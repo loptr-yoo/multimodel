@@ -102,36 +102,26 @@ Design principles:
 
     **CRITICAL DESIGN RULES**:
     - **FACILITY PLACEMENT**: 'staircase', 'elevator', and 'safe_exit' MUST be placed on 'ground' elements. They are FORBIDDEN from being on 'driving_lane'.
-    - **SPEED BUMP ORIENTATION**: 'deceleration_zone' must be PERPENDICULAR to the road direction. If the road is horizontal (width > height), the bump must be vertical (height > width).
-    - **SIDEWALKS**: 'pedestrian_path' must cross the 'driving_lane' to connect 'ground' areas.
+    - **SPEED BUMP ORIENTATION**: 'deceleration_zone' must be PERPENDICULAR to the road direction.
+    - **SIDEWALK LOGIC**: 'pedestrian_path' must cross the 'driving_lane' to connect 'ground' areas.
 
-    **CRITICAL SYSTEM ARCHITECTURE**:
-    - **Algorithmic Spot Filler**: A deterministic algorithm will automatically fill all 'ground' strips with 'parking_spot' elements after your turn. 
-    - **YOUR FOCUS**: You must place facilities (stairs, elevators), pillars at row ends, and road markings. DO NOT waste tokens drawing hundreds of parking spots.
-    - **IMMUTABILITY RULE**: You are **FORBIDDEN** from outputting, modifying, or deleting 'wall', 'driving_lane', or 'ground' elements. Only output NEW detail elements.
+    **SYSTEM ARCHITECTURE (TOKEN SAVING)**:
+    - **Algorithmic Spot Filler**: Do NOT generate 'parking_space'. My algorithm will fill them later.
+    - **Focus**: Only generate 'pillar', 'ground_line', 'guidance_sign', 'staircase', 'elevator', 'safe_exit', 'pedestrian_path'.
 
-    **INCREMENTAL UPDATE**:
-    - Return **ONLY** the NEW elements you are creating. 
+    **INCREMENTAL OUTPUT MODE (CRITICAL)**:
+    - **DO NOT** return the existing 'wall', 'driving_lane', or 'ground' elements provided in INPUT.
+    - **ONLY** return the **NEW** elements you are creating in this step.
+    - If you output existing elements, the JSON will be truncated and fail.
 
-    **GENERATION TASKS**:
-    1. **Layer 1: Structural Grid ('pillar')**
-       - Place 'pillar' (size 10x10) at corners of 'ground' areas.
-       - Max 1 pillar every 100-150 units. Sparsity is key.
-       - Pillars provide structural integrity to the parking islands.
-    2. **Layer 2: Road Logic**
-       - 'ground_line': Dashed lines (width 2) in center of 'driving_lane' areas.
-       - 'guidance_sign': (10x10) at road junctions to indicate Exit direction.
-       - 'deceleration_zone': (10x40) Place near Entrances/Exits.
-
-    3. **Layer 3: Pedestrian Paths ('pedestrian_path')**
-       - Draw zebra crossings connecting 'ground' areas across roads.
-    4. **Layer 4: Facilities**
-       - 'staircase' (30x30) + 'safe_exit' (20x20) placed together on 'ground' areas near the corners.
-       - 'elevator' (20x20), 'fire_extinguisher' (10x10) spread out.
-
-    **OUTPUT FORMAT**:
-    - JSON with 'reasoning_plan'(MAX 30 WORDS) and 'elements'.
-    - Short keys: t, x, y, w, h.
+    **OUTPUT JSON FORMAT**:
+    {
+      "reasoning_plan": "Added [X] pillars and [Y] signs...",
+      "new_elements": [
+         { "t": "pillar", "x": 100, "y": 100, "w": 10, "h": 10 },
+         { "t": "ground_line", "x": ..., "y": ..., "w": ..., "h": ... }
+      ]
+    }
   `,
 
   fix: (layout: ParkingLayout, violations: ConstraintViolation[]) => `
@@ -164,8 +154,18 @@ Design principles:
     - **Intersection Clean**: Delete Element_ID inside junction.
     - **Placement Fix**: Move Facility_ID onto nearest Ground.
 
-    **OUTPUT**: 
-    - Full JSON layout. 
-    - "reasoning_plan": "Fixed [count] violations." (KEEP SHORT).
+    **INCREMENTAL OUTPUT MODE (CRITICAL)**:
+    - **DO NOT** return the full JSON. It is too large and will be truncated.
+    - **ONLY** return the elements that you actually MODIFIED, RESIZED, or MOVED.
+    - If you resize a ground block, return ONLY that specific ground block with new coordinates.
+    - If you delete an element, do not return it (I will handle missing IDs). 
+    
+    **OUTPUT JSON FORMAT**: 
+    {
+      "reasoning_plan": "Fixed [X] violations by resizing [ID].",
+      "modified_elements": [
+         { "id": "id_1", "t": "...", "x": ..., "y": ..., "w": ..., "h": ... }
+      ]
+    }
   `
 };
