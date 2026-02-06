@@ -112,7 +112,22 @@ Design principles:
     **INCREMENTAL OUTPUT MODE (CRITICAL)**:
     - **DO NOT** return the existing 'wall', 'driving_lane', or 'ground' elements provided in INPUT.
     - **ONLY** return the **NEW** elements you are creating in this step.
-    - If you output existing elements, the JSON will be truncated and fail.
+
+    **GENERATION TASKS**:
+    1. **Layer 1: Structural Grid ('pillar')**
+       - Place 'pillar' (size 10x10) at corners of 'ground' areas.
+       - Max 1 pillar every 100-150 units. Sparsity is key.
+       - Pillars provide structural integrity to the parking islands.
+    2. **Layer 2: Road Logic**
+       - 'ground_line': Dashed lines (width 2) in center of 'driving_lane' areas.
+       - 'guidance_sign': (10x10) at road junctions to indicate Exit direction.
+       - 'deceleration_zone': (10x40) Place near Entrances/Exits.
+
+    3. **Layer 3: Pedestrian Paths ('pedestrian_path')**
+       - Draw zebra crossings connecting 'ground' areas across roads.
+    4. **Layer 4: Facilities**
+       - 'staircase' (30x30) + 'safe_exit' (20x20) placed together on 'ground' areas near the corners.
+       - 'elevator' (20x20), 'fire_extinguisher' (10x10) spread out.
 
     **OUTPUT JSON FORMAT**:
     {
