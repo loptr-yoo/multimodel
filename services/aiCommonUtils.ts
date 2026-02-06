@@ -223,7 +223,8 @@ export const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout =
                            id: `p_auto_${++t}`, 
                            type: ElementType.PARKING_SPACE, 
                            x: s.x, y: s.y, width: s.w, height: s.h,
-                           rotation: 0 
+                           rotation: 0 ,
+                            forward:[0,-1,0]//路在上方，-y
                        });
                    }
                }
@@ -241,7 +242,8 @@ export const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout =
                            id: `p_auto_${++t}`, 
                            type: ElementType.PARKING_SPACE, 
                            x: s.x, y: s.y, width: s.w, height: s.h,
-                           rotation: 0 
+                           rotation: 0,
+                            forward:[0,1,0]//路在下方，+y
                        });
                    }
               }
@@ -259,7 +261,8 @@ export const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout =
                           id: `p_auto_v_${++t}`,
                           type: ElementType.PARKING_SPACE,
                           x: s.x, y: s.y, width: s.w, height: s.h,
-                          rotation: 0
+                          rotation: 0,
+                            forward:[-1,0,0]//路在左方，-x
                       });
                   }
               }
@@ -277,7 +280,8 @@ export const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout =
                           id: `p_auto_v_${++t}`,
                           type: ElementType.PARKING_SPACE,
                           x: s.x, y: s.y, width: s.w, height: s.h,
-                          rotation: 0
+                          rotation: 0,
+                          forward:[1,0,0]//路在右方，+x
                       });
                   }
               }
@@ -336,7 +340,7 @@ export const generateChargingStations = (layout: ParkingLayout): ParkingLayout =
     const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
     const stations: LayoutElement[] = [];
     
-    // 排序以保证生成规律性
+    // 排序
     const sortedSpots = [...spots].sort((a, b) => {
         if (Math.abs(a.y - b.y) < 10) return a.x - b.x; 
         return a.y - b.y;
@@ -348,49 +352,47 @@ export const generateChargingStations = (layout: ParkingLayout): ParkingLayout =
 
     sortedSpots.forEach((spot, index) => {
         if ((index + 1) % 3 === 0) { // 每3个生成1个
-            const candidates = [
-                { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + OFFSET, side: 'top' },
-                { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + spot.height - STATION_SIZE - OFFSET, side: 'bottom' },
-                { x: spot.x + OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'left' },
-                { x: spot.x + spot.width - STATION_SIZE - OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'right' }
-            ];
+            
+            // 🚀 1. 尝试直接获取 forward
+            let forward = spot.forward;
 
-            const isVerticalSpot = spot.height > spot.width;
-            let validCandidates = candidates.filter(c => {
-                 if (isVerticalSpot) return c.side === 'top' || c.side === 'bottom';
-                 return c.side === 'left' || c.side === 'right';
-            });
-
-            // 寻找离路最远的边（防止充电桩生成在路中间）
-            let bestCandidate = validCandidates[0];
-            let maxDistToRoad = -1;
-
-            validCandidates.forEach(cand => {
-                let minDistToRoad = Infinity;
-                roads.forEach(r => {
-                    const rcx = r.x + r.width / 2;
-                    const rcy = r.y + r.height / 2;
-                    const dist = Math.sqrt(Math.pow(cand.x - rcx, 2) + Math.pow(cand.y - rcy, 2));
-                    if (dist < minDistToRoad) minDistToRoad = dist;
-                });
-
-                if (minDistToRoad > maxDistToRoad) {
-                    maxDistToRoad = minDistToRoad;
-                    bestCandidate = cand;
-                }
-            });
-
-            if (bestCandidate) {
-                stations.push({
-                    id: `charging_${++stationCount}`,
-                    type: ElementType.CHARGING_STATION,
-                    x: bestCandidate.x,
-                    y: bestCandidate.y,
-                    width: STATION_SIZE,
-                    height: STATION_SIZE,
-                    rotation: 0
-                });
+            // 🚀 2. 如果没有 (可能是 AI 生成或旧数据)，尝试实时计算
+            if (!forward) {
+               forward = inferParkingForward(spot, roads);
             }
+
+            if (forward) {
+                const [dx, dy] = forward;
+                let cx = 0, cy = 0;
+
+                // 逻辑：充电桩应位于车位的"车尾"
+                // 因为 forward 指向车头(道路)，所以车尾在反方向
+                
+                if (Math.abs(dx) < 0.1 && dy < -0.9) { // Forward UP (0, -1) -> 桩在 Bottom
+                     cx = spot.x + spot.width/2 - STATION_SIZE/2;
+                     cy = spot.y + spot.height - STATION_SIZE - OFFSET;
+                } else if (Math.abs(dx) < 0.1 && dy > 0.9) { // Forward DOWN (0, 1) -> 桩在 Top
+                     cx = spot.x + spot.width/2 - STATION_SIZE/2;
+                     cy = spot.y + OFFSET;
+                } else if (dx < -0.9 && Math.abs(dy) < 0.1) { // Forward LEFT (-1, 0) -> 桩在 Right
+                     cx = spot.x + spot.width - STATION_SIZE - OFFSET;
+                     cy = spot.y + spot.height/2 - STATION_SIZE/2;
+                } else if (dx > 0.9 && Math.abs(dy) < 0.1) { // Forward RIGHT (1, 0) -> 桩在 Left
+                     cx = spot.x + OFFSET;
+                     cy = spot.y + spot.height/2 - STATION_SIZE/2;
+                }
+
+                // 只有坐标有效时才添加
+                if (cx !== 0 || cy !== 0) {
+                    stations.push({
+                        id: `charging_${++stationCount}`,
+                        type: ElementType.CHARGING_STATION,
+                        x: cx, y: cy,
+                        width: STATION_SIZE, height: STATION_SIZE,
+                        rotation: 0 
+                    });
+                }
+            } 
         }
     });
 
