@@ -746,16 +746,20 @@ export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
   
   // 2. 定义哪些元素被视为“实体”，需要从地面中挖除
   // 注意：不要包含 LANE_LINE, GUIDANCE_SIGN 等覆盖物，地面应该铺在它们下面
-  const solidTypes = [
-    'WALL', 'driving_lane', 'PARKING_SPACE', 'GROUND', 
-    'ALARM', 'STAIRCASE', 'ELEVATOR', 'PILLAR'
-  ];
+  const solidTypes = new Set<string>([
+    ElementType.WALL,
+    ElementType.ROAD,
+    ElementType.RAMP,
+    ElementType.ENTRANCE,
+    ElementType.EXIT,
+    ElementType.GROUND
+  ]);
 
   // 3. 执行几何减法
   for (const el of layout.elements) {
     // 过滤：如果不是实体类型，或者是系统刚生成的补丁(防止递归)，则跳过
-    const type = (el.type || '').toString().toUpperCase();
-    if (!solidTypes.includes(type) && !solidTypes.includes(el.type)) continue;
+    const type = normalizeType(el.type as any);
+    if (!solidTypes.has(type)) continue;
     if (el.id.startsWith('auto_ground_void_')) continue;
 
     const nextVoids = [];
@@ -771,7 +775,7 @@ export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
     .filter(v => v.width >= 5 && v.height >= 5) // 过滤微小碎片
     .map((v, i) => ({
       id: `auto_ground_void_${Date.now()}_${i}`,
-      type: 'GROUND', // 确保使用你的枚举 ElementType.GROUND
+      type: ElementType.GROUND,
       x: Math.round(v.x),
       y: Math.round(v.y),
       width: Math.round(v.width),
