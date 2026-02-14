@@ -1,5 +1,45 @@
 import { ParkingLayout, ConstraintViolation } from '../types';
 
+const PROTOCOLS = {
+  FULL_STATE: `
+ ## OUTPUT FORMAT: FULL STATE 
+ - Return the COMPLETE JSON object with ALL elements. 
+ - DO NOT use partial updates. 
+ `,
+  PATCH_ONLY: `
+ ## OUTPUT FORMAT: INCREMENTAL PATCH (CRITICAL) 
+ - You are operating in **Low-Bandwidth Mode**. 
+ - **DO NOT** return the full JSON. 
+ - **ONLY** return the elements that you modified, added, or moved. 
+ - Use the structure: { "modified_elements": [...], "deleted_ids": [...] } 
+ - If you change a wall's length, return the object with the SAME ID and new 'width'. 
+ - Maintain ID CONSISTENCY: Never rename existing element IDs. Use the SAME ID for modifications. 
+ - If you create NEW elements, include them under "new_elements"; do not mix with "modified_elements". 
+ - STRICT OUTPUT: Respond with RAW JSON only. No Markdown, no code fences, no explanatory text. 
+ - REQUIRED KEYS: Use exactly "modified_elements" and "deleted_ids" for patches. 
+ `
+};
+
+const ROLES = {
+  GENERATOR: `
+ ## YOUR ROLE: Visionary Architect 
+ You are a senior spatial designer. Your goal is to create a layout from scratch. 
+ Focus on creativity, flow, and spatial utilization. 
+ `,
+  OPTIMIZER: `
+ ## YOUR ROLE: Detail-Oriented Engineer 
+ You are a facility optimization expert. The layout already exists. 
+ Your goal is to ADD facilities (stairs, elevators) without breaking the existing structure. 
+ Focus on precision and compliance. 
+ `,
+  FIXER: `
+ ## YOUR ROLE: Strict Compliance Officer (Debugger) 
+ You are a code logic validator. You DO NOT design; you ONLY fix violations. 
+ Your goal is to resolve overlaps and invalid placements surgically. 
+ Be minimal and non-destructive. 
+ `
+};
+
 export const PROMPTS = {
   // 通用系统提示（用于 DeepSeek、OpenAI 等）
   systemPrompt: () => `You are an expert parking lot designer with extensive experience in spatial planning.
@@ -140,6 +180,8 @@ Design principles:
   `,
 
   fix: (layout: ParkingLayout, violations: ConstraintViolation[]) => `
+    ${ROLES.FIXER}
+    ${PROTOCOLS.PATCH_ONLY}
     You are a **Topological Constraint Solver**.
     
     **INPUT**: ${layout.width}x${layout.height} Canvas.
@@ -182,5 +224,33 @@ Design principles:
          { "id": "id_1", "t": "...", "x": ..., "y": ..., "w": ..., "h": ... }
       ]
     }
-  `
+  `,
+  generateSystemPrompt: (description: string) => `
+ ${ROLES.GENERATOR}
+ ${PROTOCOLS.FULL_STATE}
+ ${PROMPTS.generation(description)}
+ `,
+  optimizeSystemPrompt: (simplifiedLayout: any, width: number, height: number) => `
+ ${ROLES.OPTIMIZER}
+ ${PROTOCOLS.PATCH_ONLY}
+ ${PROMPTS.refinement(simplifiedLayout, width, height)}
+ `,
+  fixSystemPrompt: (layout: ParkingLayout, violations: ConstraintViolation[]) => `
+ ${ROLES.FIXER}
+ ${PROTOCOLS.PATCH_ONLY}
+ ${PROMPTS.fix(layout, violations)}
+ `,
+  fixPrompt: (violations: any[]) => `
+ CONTEXT: The current layout has logical errors. 
+ VIOLATIONS: ${JSON.stringify(violations)} 
+ 
+ MISSION: 
+ 1. Analyze the specific IDs involved in the violations. 
+ 2. Apply the MINIMAL changes needed to resolve them (e.g., slight resize or move). 
+ 3. **DO NOT regenerate the whole map.** Only output the specific elements you touched. 
+ 
+ REMEMBER: You are the "Compliance Officer". Do not redesign the parking lot. Just fix the bugs. 
+ 
+ ${PROTOCOLS.PATCH_ONLY}
+ `
 };

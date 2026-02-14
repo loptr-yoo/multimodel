@@ -7,15 +7,191 @@
 import { ParkingLayout, ElementType, LayoutElement, ConstraintViolation } from '../types';
 import { validateLayout, getIntersectionBox } from '../utils/geometry';
 
+// =============== 几何计算工具 ===============
+
+/**
+ * 矩形减法运算：从矩形 r1 中减去矩形 r2，返回剩余的矩形碎片
+ */
+const subtractRectangle = (
+  r1: { x: number; y: number; width: number; height: number }, 
+  r2: { x: number; y: number; width: number; height: number }
+): { x: number; y: number; width: number; height: number }[] => {
+  // Check intersection
+  const ix = Math.max(r1.x, r2.x);
+  const iy = Math.max(r1.y, r2.y);
+  const iw = Math.min(r1.x + r1.width, r2.x + r2.width) - ix;
+  const ih = Math.min(r1.y + r1.height, r2.y + r2.height) - iy;
+
+  if (iw <= 0 || ih <= 0) return [r1]; // No intersection
+
+  const res: { x: number; y: number; width: number; height: number }[] = [];
+  
+  // Top strip
+  if (r1.y < iy) {
+    res.push({ x: r1.x, y: r1.y, width: r1.width, height: iy - r1.y });
+  }
+  // Bottom strip
+  if (r1.y + r1.height > iy + ih) {
+    res.push({ x: r1.x, y: iy + ih, width: r1.width, height: (r1.y + r1.height) - (iy + ih) });
+  }
+  // Middle Left
+  if (r1.x < ix) {
+    res.push({ x: r1.x, y: iy, width: ix - r1.x, height: ih });
+  }
+  // Middle Right
+  if (r1.x + r1.width > ix + iw) {
+    res.push({ x: ix + iw, y: iy, width: (r1.x + r1.width) - (ix + iw), height: ih });
+  }
+  
+  return res;
+};
+
 // =============== 基础工具 ===============
 
 export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
+ * 增量合并工具函数：将补丁合并到布局中
+ * 支持新增、更新、删除操作
+ */
+export const mergePatchesToLayout = (
+  currentLayout: ParkingLayout,
+  patches: any[],
+  deletedIds: string[] = [],
+  options: { mode: 'strict' | 'allowCreate' } = { mode: 'strict' }
+): ParkingLayout => {
+  const elementMap = new Map(currentLayout.elements.map(el => [el.id, el]));
+  const prune = (o: any) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
+  if (deletedIds && deletedIds.length > 0) deletedIds.forEach(id => elementMap.delete(id));
+  if (!patches || patches.length === 0) return { ...currentLayout, elements: Array.from(elementMap.values()) };
+  patches.forEach(raw => {
+    const patch = prune(raw);
+    const pid = String(patch.id ?? patch.element_id ?? '');
+    if (!pid) return;
+    const existing = elementMap.get(pid);
+    if (existing) {
+      const merged: any = { ...existing };
+      Object.keys(patch).forEach(key => {
+        const val = (patch as any)[key];
+        if (val === undefined || val === null) return;
+        if (['x', 'y', 'width', 'height', 'rotation'].includes(key)) {
+          const num = Number(val);
+          if (!isNaN(num)) merged[key] = num;
+        } else if (key === 'type' || key === 't') {
+          merged['type'] = normalizeType((patch as any).type ?? (patch as any).t);
+        } else {
+          merged[key] = val;
+        }
+      });
+      elementMap.set(pid, merged);
+    } else {
+      if (options.mode === 'allowCreate') {
+        const typeVal = normalizeType((patch as any).type ?? (patch as any).t);
+        const xOk = (patch as any).x !== undefined;
+        const yOk = (patch as any).y !== undefined;
+        if (typeVal && xOk && yOk) {
+          elementMap.set(pid, { ...patch, type: typeVal, id: pid } as any);
+        } else {
+          console.warn(`[Merge] 拒绝创建数据不全的新元素: ${pid}`);
+        }
+      } else {
+        console.warn(`[Merge] Strict模式丢弃未知 ID: ${pid}`);
+      }
+    }
+  });
+  return { ...currentLayout, elements: Array.from(elementMap.values()) };
+};
+
+/**
+ * 鸭子类型更新函数：根据 AI 响应的格式智能更新布局
+ */
+export const updateMapState = (
+  currentState: ParkingLayout,
+  aiResponse: any
+): ParkingLayout => {
+  // 深拷贝当前状态
+  const nextState = JSON.parse(JSON.stringify(currentState));
+
+  // 情况 A: AI 返回了标准的全量列表 (GPT/Gemini 的习惯)
+  if (aiResponse.elements && Array.isArray(aiResponse.elements)) {
+    console.log("📥 接收全量状态更新");
+    nextState.elements = aiResponse.elements;
+  }
+  
+  // 情况 B: AI 返回了增量补丁 (DeepSeek 的习惯)
+  else if (aiResponse.modified_elements && Array.isArray(aiResponse.modified_elements)) {
+    console.log("🩹 接收增量补丁更新");
+    aiResponse.modified_elements.forEach((patch: any) => {
+      const idx = nextState.elements.findIndex((el: any) => el.id === patch.id);
+      if (idx !== -1) {
+        // 存在则合并更新 (Partial Update)
+        nextState.elements[idx] = { ...nextState.elements[idx], ...patch };
+      } else {
+        // 不存在则新增 (Add)
+        nextState.elements.push(patch);
+      }
+    });
+    
+    // 可选：处理删除逻辑 (deleted_ids)
+    if (aiResponse.deleted_ids) {
+      nextState.elements = nextState.elements.filter(
+        (el: any) => !aiResponse.deleted_ids.includes(el.id)
+      );
+    }
+  }
+  
+  // 情况 C: 异常兜底
+  else {
+    console.warn("⚠️ 未识别的数据格式，跳过更新");
+  }
+
+  return nextState;
+};
+
+export const normalizePartialPatches = (patches: any[]): any[] => {
+  if (!Array.isArray(patches)) return [];
+  return patches.map(p => {
+    const q: any = {};
+    if (p.id !== undefined) q.id = String(p.id);
+    else if (p.old_id !== undefined) q.id = String(p.old_id);
+    else if (p.original_id !== undefined) q.id = String(p.original_id);
+    else if (p.ref_id !== undefined) q.id = String(p.ref_id);
+    if (p.type !== undefined || p.t !== undefined) q.type = normalizeType(p.type ?? p.t);
+    
+    if (p.x !== undefined) { const n = Number(p.x); if (!isNaN(n)) q.x = n; }
+    if (p.y !== undefined) { const n = Number(p.y); if (!isNaN(n)) q.y = n; }
+    if (p.width !== undefined || p.w !== undefined) { const n = Number(p.width ?? p.w); if (!isNaN(n)) q.width = n; }
+    if (p.height !== undefined || p.h !== undefined) { const n = Number(p.height ?? p.h); if (!isNaN(n)) q.height = n; }
+    if (p.rotation !== undefined || p.r !== undefined) { const n = Number(p.rotation ?? p.r); if (!isNaN(n)) q.rotation = n; }
+    
+    if (p.label !== undefined || p.l !== undefined) q.label = p.label ?? p.l;
+    return q;
+  });
+};
+
+export const dedupePatchesAgainstLayout = (layout: ParkingLayout, patches: any[], tolerance = 5): any[] => {
+  return patches.filter(patch => {
+    const t = normalizeType(patch.type ?? patch.t);
+    const x = Number(patch.x ?? 0);
+    const y = Number(patch.y ?? 0);
+    const w = Number(patch.width ?? patch.w ?? 0);
+    const h = Number(patch.height ?? patch.h ?? 0);
+    const duplicate = layout.elements.some(el => {
+      if (normalizeType(el.type as any) !== t) return false;
+      const nearPos = Math.abs(el.x - x) <= tolerance && Math.abs(el.y - y) <= tolerance;
+      const nearSize = (w && h) ? (Math.abs(el.width - w) <= tolerance && Math.abs(el.height - h) <= tolerance) : true;
+      return nearPos && nearSize;
+    });
+    return !duplicate;
+  });
+};
+
+
+/**
  * 将模型/AI输出的类型名称归一化为内部 ElementType 或兼容字符串
  */
 export const normalizeType = (t: string | undefined): string => {
-  if (!t) return ElementType.WALL;
+  if (!t || typeof t !== 'string') return ElementType.WALL;
   const key = t.toLowerCase().trim().replace(/\s+/g, '_');
   const map: Record<string, string> = {
     ramp: ElementType.RAMP,
@@ -96,16 +272,16 @@ export const inferParkingForward = (
  * 将 AI 响应数据映射到内部布局格式
  */
 export const mapToInternalLayout = (rawData: any): ParkingLayout => ({
-  width: Number(rawData.width || 800),
-  height: Number(rawData.height || 600),
+  width: Number(rawData.width || 800) || 800,
+  height: Number(rawData.height || 600) || 600,
   elements: (rawData.elements || []).map((e: any) => ({
     id: String(e.id || `el_${Math.random().toString(36).substr(2, 9)}`),
     type: normalizeType(e.type || e.t),
-    x: Number(e.x || 0),
-    y: Number(e.y || 0),
-    width: Number(e.width || e.w || 10),
-    height: Number(e.height || e.h || 10),
-    rotation: Number(e.rotation || e.r || 0),
+    x: Number(e.x || 0) || 0,
+    y: Number(e.y || 0) || 0,
+    width: Number(e.width || e.w || 10) || 10,
+    height: Number(e.height || e.h || 10) || 10,
+    rotation: Number(e.rotation || e.r || 0) || 0,
     label: e.label || e.l
   }))
 });
@@ -156,12 +332,19 @@ export const mergeLayoutElements = (
 };
 
 export const calculateScore = (violations: ConstraintViolation[]): number => {
-  return violations.reduce((acc, v) => {
-    if (v.type === 'overlap') return acc + 5;
-    if (v.type === 'connectivity_error') return acc + 10;
-    if (v.type === 'out_of_bounds') return acc + 8;
-    return acc + 2;
-  }, 0);
+  let score = 0;
+  let connectivity = 0;
+  violations.forEach(v => {
+    if (v.type === 'overlap') score += 5;
+    else if (v.type === 'out_of_bounds') score += 8;
+    else if (v.type === 'placement_error') score += 4;
+    else if (v.type === 'connectivity_error') {
+      score += 12;
+      connectivity += 1;
+    } else score += 2;
+  });
+  score += Math.max(0, connectivity - 1) * 5;
+  return score;
 };
 
 // =============== 核心几何算法 (之前丢失的部分) ===============
@@ -491,6 +674,120 @@ export const orientGuidanceSigns = (layout: ParkingLayout): ParkingLayout => {
     return { ...layout, elements: updated };
 };
 
+export const generateAutoConnectivityPatches = (layout: ParkingLayout): any[] => {
+  const violations = validateLayout(layout);
+  const ramps = layout.elements.filter(e => e.type === ElementType.RAMP);
+  const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
+  const gates = layout.elements.filter(e => e.type === ElementType.ENTRANCE || e.type === ElementType.EXIT);
+  const patches: any[] = [];
+  const addRampForGate = (gate: LayoutElement) => {
+    const w = 40, h = 60;
+    let rx = gate.x + gate.width / 2 - w / 2;
+    let ry = gate.y;
+    if (gate.y <= 5) ry = gate.y + gate.height;
+    else if (gate.y + gate.height >= layout.height - 5) ry = gate.y - h;
+    else if (gate.x <= 5) rx = gate.x + gate.width;
+    else if (gate.x + gate.width >= layout.width - 5) rx = gate.x - w;
+    patches.push({ t: 'RAMP', type: ElementType.RAMP, x: Math.round(rx), y: Math.round(ry), w, h });
+  };
+  const touchRoad = (ramp: LayoutElement) => {
+    let best: { road: LayoutElement; dx: number; dy: number } | null = null;
+    roads.forEach(rd => {
+      const cx1 = ramp.x + ramp.width / 2, cy1 = ramp.y + ramp.height / 2;
+      const cx2 = rd.x + rd.width / 2, cy2 = rd.y + rd.height / 2;
+      const d = Math.abs(cx1 - cx2) + Math.abs(cy1 - cy2);
+      if (!best || d < Math.abs(best.dx) + Math.abs(best.dy)) best = { road: rd, dx: cx2 - cx1, dy: cy2 - cy1 };
+    });
+    if (!best) return;
+    let x = ramp.x, y = ramp.y, w = ramp.width, h = ramp.height;
+    if (Math.abs(best.dx) > Math.abs(best.dy)) {
+      if (best.dx > 0) w = Math.max(w, best.road.x - ramp.x);
+      else w = Math.max(w, ramp.x + ramp.width - (best.road.x + best.road.width));
+    } else {
+      if (best.dy > 0) h = Math.max(h, best.road.y - ramp.y);
+      else h = Math.max(h, ramp.y + ramp.height - (best.road.y + best.road.height));
+    }
+    patches.push({ id: ramp.id, t: 'RAMP', type: ElementType.RAMP, x, y, w, h });
+  };
+  violations.forEach(v => {
+    if (v.type === 'connectivity_error' && v.message.includes('needs Ramp')) {
+      const gate = gates.find(g => g.id === v.elementId);
+      if (gate) addRampForGate(gate);
+    }
+    if (v.type === 'connectivity_error' && v.message.includes('Ramp disconnected')) {
+      const ramp = ramps.find(r => r.id === v.elementId);
+      if (ramp) touchRoad(ramp);
+    }
+  });
+  return patches;
+};
+
+export const fixSmallGeometry = (layout: ParkingLayout): ParkingLayout => {
+  const minSize = 4;
+  return {
+    ...layout,
+    elements: layout.elements.map(el => {
+      const w = Math.max(minSize, Math.round(el.width || 0));
+      const h = Math.max(minSize, Math.round(el.height || 0));
+      return { ...el, width: w, height: h };
+    })
+  };
+};
+
+/**
+ * 自动填充空洞
+ * 扫描整个画布，将所有未被覆盖的区域填充为 GROUND
+ */
+// aiCommonUtils.ts
+
+export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
+  // 1. 初始化空洞为全图
+  let voids = [{ x: 0, y: 0, width: layout.width, height: layout.height }];
+  
+  // 2. 定义哪些元素被视为“实体”，需要从地面中挖除
+  // 注意：不要包含 LANE_LINE, GUIDANCE_SIGN 等覆盖物，地面应该铺在它们下面
+  const solidTypes = [
+    'WALL', 'driving_lane', 'PARKING_SPACE', 'GROUND', 
+    'ALARM', 'STAIRCASE', 'ELEVATOR', 'PILLAR'
+  ];
+
+  // 3. 执行几何减法
+  for (const el of layout.elements) {
+    // 过滤：如果不是实体类型，或者是系统刚生成的补丁(防止递归)，则跳过
+    const type = (el.type || '').toString().toUpperCase();
+    if (!solidTypes.includes(type) && !solidTypes.includes(el.type)) continue;
+    if (el.id.startsWith('auto_ground_void_')) continue;
+
+    const nextVoids = [];
+    for (const v of voids) {
+      // subtractRectangle 需要在文件上方定义好
+      nextVoids.push(...subtractRectangle(v, el));
+    }
+    voids = nextVoids;
+  }
+  
+  // 4. 生成新地面元素
+  const newGrounds = voids
+    .filter(v => v.width >= 5 && v.height >= 5) // 过滤微小碎片
+    .map((v, i) => ({
+      id: `auto_ground_void_${Date.now()}_${i}`,
+      type: 'GROUND', // 确保使用你的枚举 ElementType.GROUND
+      x: Math.round(v.x),
+      y: Math.round(v.y),
+      width: Math.round(v.width),
+      height: Math.round(v.height),
+      rotation: 0
+    }));
+
+  if (newGrounds.length === 0) return layout;
+
+  return {
+    ...layout,
+    // ✅ 关键修复：把新地面放在数组最前面（最底层），防止遮挡其他元素
+    elements: [...newGrounds, ...layout.elements] 
+  };
+};
+
 /**
  * 几何增强主入口
  * 统一调用所有几何处理算法
@@ -500,6 +797,9 @@ export const enhanceLayoutWithGeometry = async (
   onLog?: (msg: string) => void
 ): Promise<ParkingLayout> => {
   let current = layout;
+
+  onLog?.('🌑 扫描并填充空洞区域...');
+  current = fillVoidsWithGround(current);
 
   onLog?.('📐 执行几何填充算法...');
   current = fillParkingAutomatically(current);

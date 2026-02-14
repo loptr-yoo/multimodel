@@ -13,7 +13,13 @@ import {
   mapToInternalLayout,
   postProcessLayout,
   mergeLayoutElements,
+  mergePatchesToLayout,
+  normalizePartialPatches,
+  generateAutoConnectivityPatches,
+  fixSmallGeometry,
+  dedupePatchesAgainstLayout,
   enhanceLayoutWithGeometry,
+  fillVoidsWithGround,
   calculateScore,
   sleep
 } from './aiCommonUtils';
@@ -70,6 +76,13 @@ const runIterativeFix = async (
     
     // 如果分数没有改善且不是第一轮，提前退出（防止死循环）
     if (score >= lastScore && pass > 1) {
+      const autoPatches = generateAutoConnectivityPatches(currentLayout);
+      if (autoPatches.length > 0) {
+        onLog?.(`🧩 触发自动补丁: ${autoPatches.length} 个`);
+        const cleaned = normalizePartialPatches(autoPatches);
+        currentLayout = mergePatchesToLayout(currentLayout, cleaned, []);
+        continue;
+      }
       onLog?.(`🛑 [Fix Loop] 优化停滞 (Score ${score}), 停止修复`);
       break;
     }
@@ -90,24 +103,43 @@ const runIterativeFix = async (
 
       const parsed = await safeParseResponse(fixResponse, { provider: client.providerName as any, model: config.model }, onLog);
 
-      // 🟢 增量合并逻辑 (Smart Merge)
+      // 🟢 鸭子类型增量合并逻辑 (Smart Merge)
       // 优先查找 modified_elements，如果 AI 还是习惯性返回了 elements，也能兼容
-      const patches = parsed.modified_elements || parsed.elements || [];
+      let patches: any[] = [];
+      let deletedIds = [];
       
-      if (patches.length > 0) {
-        onLog?.(`🔧 应用 ${patches.length} 个修复补丁...`);
-        
-        // 将补丁转换回内部格式
-        const patchLayout = mapToInternalLayout({ elements: patches });
-        
-        // 使用 mergeLayoutElements 将变动合并到 currentLayout
-        // 这样未变动的 500 个车位会被保留，变动的 2 个地块会被更新
-        currentLayout = {
-          ...currentLayout,
-          elements: mergeLayoutElements(currentLayout.elements, patchLayout.elements)
-        };
+      if (parsed.modified_elements && Array.isArray(parsed.modified_elements)) {
+        // 增量模式
+        patches = parsed.modified_elements;
+        deletedIds = parsed.deleted_ids || [];
+        onLog?.(`🔧 应用 ${patches.length} 个修复补丁，删除 ${deletedIds.length} 个元素...`);
+      } else if (parsed.elements && Array.isArray(parsed.elements)) {
+        // 全量模式
+        patches = parsed.elements;
+        onLog?.(`🔧 应用全量更新 (${patches.length} 个元素)...`);
       } else {
         onLog?.(`⚠️ AI 未返回有效修复，跳过此轮`);
+        continue;
+      }
+      
+      if (patches.length > 0) {
+        if (parsed.modified_elements && !parsed.elements) {
+      const cleaned = normalizePartialPatches(patches);
+      currentLayout = mergePatchesToLayout(currentLayout, cleaned, deletedIds, { mode: 'strict' });
+        } else {
+          const full = mapToInternalLayout({ width: currentLayout.width, height: currentLayout.height, elements: patches });
+          currentLayout = { ...currentLayout, elements: full.elements };
+        }
+      } else {
+        const autoPatches = generateAutoConnectivityPatches(currentLayout);
+        if (autoPatches.length > 0) {
+          onLog?.(`🧩 模型返回空补丁，应用自动补丁 ${autoPatches.length} 个`);
+          const cleaned = normalizePartialPatches(autoPatches);
+          const uniqueAuto = dedupePatchesAgainstLayout(currentLayout, cleaned, 5);
+          if (uniqueAuto.length > 0) {
+            currentLayout = mergePatchesToLayout(currentLayout, uniqueAuto, [], { mode: 'allowCreate' });
+          }
+        }
       }
 
     } catch (e: any) {
@@ -149,7 +181,7 @@ export const executeGeneration = async (
   const config: LLMConfig = {
     apiKey, model,
     temperature: 1.2,
-    maxTokens: 9000
+    maxTokens: 8192
   };
 
   onLog?.(` [${client.providerName}] 开始生成...`);
@@ -201,6 +233,9 @@ export const executeGeneration = async (
   // 3. 自动修复循环
   layout = await runIterativeFix(layout, client, config, onLog);
 
+  // 4. 自动填充空洞 (确保粗粒度图也没有黑洞)
+  layout = fillVoidsWithGround(layout);
+
   return postProcessLayout(layout);
 };
 
@@ -231,32 +266,55 @@ export const executeRefinement = async (
   try {
     // 2. AI 生成新细节 (柱子、标线等)
     const responseText = await callLLMWithRetry(client, [
-      { role: 'user', content: PROMPTS.refinement({ elements: simplified }, currentLayout.width, currentLayout.height) }
+      { role: 'user', content: PROMPTS.optimizeSystemPrompt({ elements: simplified }, currentLayout.width, currentLayout.height) }
     ], config, onLog);
 
     const rawData = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
-    const newRawElements = rawData.new_elements || rawData.elements || [];
 
-    // 转换并合并
-    const mappedNewElements = mapToInternalLayout({ 
-      width: currentLayout.width, 
-      height: currentLayout.height, 
-      elements: newRawElements 
-    }).elements;
+    // 🧠 分支逻辑：全量 vs 增量（修复数组拼接导致的重复/重叠问题）
+    let layout: ParkingLayout = currentLayout;
+    if (rawData.modified_elements && Array.isArray(rawData.modified_elements)) {
+      onLog?.(`🩹 应用修改补丁: ${rawData.modified_elements.length} 个`);
+      const updates = normalizePartialPatches(rawData.modified_elements);
+      layout = mergePatchesToLayout(currentLayout, updates, rawData.deleted_ids || [], { mode: 'strict' });
+    } else if (rawData.new_elements && Array.isArray(rawData.new_elements)) {
+      onLog?.(`➕ 应用新增元素: ${rawData.new_elements.length} 个`);
+      const adds = mapToInternalLayout({
+        width: currentLayout.width,
+        height: currentLayout.height,
+        elements: rawData.new_elements
+      }).elements;
+      layout = mergePatchesToLayout(currentLayout, adds, [], { mode: 'allowCreate' });
+    } else if (rawData.elements && Array.isArray(rawData.elements)) {
+      onLog?.(`📥 应用全量更新: ${rawData.elements.length} 个元素`);
+      
+      // 🛑 [FIX] 解压缩写 (t->type, w->width, h->height)
+      const expandedElements = normalizePartialPatches(rawData.elements);
 
-    let layout: ParkingLayout = {
-      width: currentLayout.width,
-      height: currentLayout.height,
-      elements: [...currentLayout.elements, ...mappedNewElements]
-    };
+      const normalizedElements = mapToInternalLayout({
+        width: rawData.width || currentLayout.width,
+        height: rawData.height || currentLayout.height,
+        elements: expandedElements
+      }).elements;
+      layout = {
+        ...currentLayout,
+        width: rawData.width || currentLayout.width,
+        height: rawData.height || currentLayout.height,
+        elements: normalizedElements
+      };
+    } else {
+      onLog?.(`⚠️ AI 未返回有效元素，跳过更新`);
+      return currentLayout;
+    }
 
+    
+
+    layout = fixSmallGeometry(layout);
     // 3. 几何增强 (铺车位、加充电桩)
     // 这一步会产生大量 PARKING_SPACE，可能会与 AI 生成的柱子重叠
     layout = await enhanceLayoutWithGeometry(layout, onLog);
 
     // 🟢 4. 最终修复 (The Final Polish)
-    // 因为现在有了"增量修复"策略，AI 只会返回修改过的元素，不会把几百个车位删光。
-    // 这时候运行修复是非常安全的，可以解决 算法车位 vs AI柱子 的冲突。
     onLog?.(`🔧 执行最终冲突微调 (增量安全模式)...`);
     
     // 使用极低温度 (0.0) 确保它只做数学题，不发挥想象力
