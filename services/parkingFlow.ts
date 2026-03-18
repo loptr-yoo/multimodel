@@ -4,7 +4,7 @@
  * 适用于所有 LLM Provider
  */
 
-import { ParkingLayout, ConstraintViolation, ElementType } from '../types';
+import { ParkingLayout, ConstraintViolation, ElementType, SceneDefinition } from '../types';
 import { PROMPTS } from '../utils/prompts';
 import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 import { safeParseResponse, normalizeLayoutElementTypes } from './responseParser';
@@ -89,6 +89,7 @@ const runIterativeFix = async (
   layout: ParkingLayout,
   client: LLMClient,
   config: LLMConfig,
+  scene: SceneDefinition,
   onLog?: (msg: string) => void,
   options: { freezeStructural?: boolean } = {}
 ): Promise<ParkingLayout> => {
@@ -150,7 +151,7 @@ const runIterativeFix = async (
     try {
       // 发送请求
       const fixResponse = await callLLMWithRetry(client, [
-        { role: 'user', content: PROMPTS.fix(simplifiedInput as any, violations) }
+        { role: 'user', content: PROMPTS.fix(simplifiedInput as any, violations, scene) }
       ], { ...config, temperature: 0.1 }, onLog);
 
       const parsed = await safeParseResponse(fixResponse, { provider: client.providerName as any, model: config.model }, onLog);
@@ -307,7 +308,7 @@ export const executeGeneration = async (
 
   if (!isParkingScene) return postProcessLayout(layout);
 
-  layout = await runIterativeFix(layout, client, config, onLog);
+  layout = await runIterativeFix(layout, client, config, scene, onLog);
   layout = fillVoidsWithGround(layout);
   layout = postProcessLayout(layout);
   const voidRatio = calculateVoidRatio(layout);
@@ -427,7 +428,7 @@ export const executeRefinement = async (
     
     // 使用极低温度 (0.0) 确保它只做数学题，不发挥想象力
     if (isParkingScene) {
-      layout = await runIterativeFix(layout, client, { ...config, temperature: 0.0 }, onLog, { freezeStructural: true });
+      layout = await runIterativeFix(layout, client, { ...config, temperature: 0.0 }, scene, onLog, { freezeStructural: true });
     }
 
     onLog?.(`✅ 细化流程全部完成`);

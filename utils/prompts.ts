@@ -81,9 +81,17 @@ Design principles:
 - Include pedestrian paths
 - Place support infrastructure logically`,
 
-  generation: (description: string, scene: SceneDefinition) => `
+  generation: (description: string, scene: SceneDefinition) => {
+    const isParking = scene.promptConfig.requiredElements.includes('driving_lane') || scene.promptConfig.requiredElements.includes('slope');
+    
+    // --- 1. Parking Scene Logic (Coarse-Grained Skeleton) ---
+    if (isParking) {
+      return `
   You are an **${scene.promptConfig.roleDefinition}**.
-  Generate a COARSE-GRAINED JSON layout (0,0 at top-left) for: "${description}".
+  Generate a **COARSE-GRAINED JSON layout** (0,0 at top-left) for: "${description}".
+  
+  **GOAL**: Create the infrastructure skeleton (Walls, Roads, Ground, Entrances).
+  **DO NOT** generate fine details like 'parking_space', 'pillar', or 'lane_line' yet. These will be added later.
 
   **CANVAS CONSTRAINTS**: Width: 800, Height: 600.
 
@@ -99,16 +107,44 @@ Design principles:
 
   **JSON EXAMPLE**:
   ${scene.promptConfig.exampleJSON}
-  `,
+      `;
+    }
+
+    // --- 2. Floor Plan / General Scene Logic (Complete Structure) ---
+    return `
+  You are an **${scene.promptConfig.roleDefinition}**.
+  Generate a **COMPLETE STRUCTURAL JSON layout** (0,0 at top-left) for: "${description}".
+  
+  **GOAL**: Create the full architectural shell, including ALL walls (exterior & interior), zones (rooms), and connectivity (doors/windows).
+  **DO NOT** generate furniture yet (beds, sofas, etc.) unless explicitly asked, but **DO** generate all structural partitions.
+
+  **CANVAS CONSTRAINTS**: Width: 800, Height: 600.
+
+  **CRITICAL GEOMETRIC RULES**:
+  ${scene.promptConfig.geometricRules}
+
+  **TOKEN SAVING INSTRUCTION**:
+  - Keep 'reasoning_plan' extremely short (max 1 sentence).
+  - Use compact keys: t/x/y/w/h where possible.
+
+  **REQUIRED ELEMENTS**:
+  ${scene.promptConfig.requiredElements.map(e => `- '${e}'`).join('\n')}
+
+  **JSON EXAMPLE**:
+  ${scene.promptConfig.exampleJSON}
+    `;
+  },
 
   refinement: (simplifiedLayout: any, width: number, height: number, scene: SceneDefinition) => {
     const isParking = scene.promptConfig.requiredElements.includes('driving_lane') || scene.promptConfig.requiredElements.includes('slope');
     if (!isParking) {
       const allowed = Object.keys(scene.styles || {}).join(', ');
       return `
-    You are a **2D Scene Detailer**.
-    Task: Add NEW detail elements to the existing layout without changing structure.
-
+    You are a **2D Scene Detailer & Interior Designer**.
+    Task: 
+    1. If the layout is empty or missing internal walls, **BUILD THEM** based on the prompt logic.
+    2. If the structure is complete, **FURNISH** the rooms with appropriate furniture/fixtures.
+    
     Canvas: ${width}x${height}
     Existing Elements:
     ${JSON.stringify(simplifiedLayout.elements)}
@@ -116,8 +152,9 @@ Design principles:
     Allowed types: ${allowed || 'any lowercase strings'}
 
     Rules:
-    - Do NOT modify or delete existing elements.
-    - Only add new elements.
+    - **RESPECT EXISTING STRUCTURE**: Do not move exterior walls unless broken.
+    - **FURNISHING**: Place beds in bedrooms, sofas in living rooms, etc.
+    - **COMPLETION**: If rooms are missing (e.g. only outer walls exist), please ADD partition_walls and doors to create the rooms.
     - Use compact keys: t/x/y/w/h.
 
     Output JSON:

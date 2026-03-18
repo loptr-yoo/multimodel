@@ -1,4 +1,6 @@
 import { ElementType, SceneDefinition } from '../types';
+import { floorPlanSystemPrompt, floorPlanExamples } from './floorPrompts';
+import { enforceOrthogonalWalls, closeExteriorBoundary, snapDoorsToWalls } from '../services/floorGeometryUtils';
 import {
   cleanIntersections,
   fillParkingAutomatically,
@@ -150,9 +152,82 @@ export const GenericScene: SceneDefinition = {
   zOrder: ['floor', 'grass', 'park', 'water', 'road', 'building', 'wall', 'zone', 'object']
 };
 
+export const FloorPlanScene: SceneDefinition = {
+  id: 'building_floor_plan',
+  name: 'Floor Plan',
+  description: 'Architectural floor plan with structural rules.',
+  promptConfig: {
+    roleDefinition: 'Architectural Floor Plan Designer',
+    geometricRules: floorPlanSystemPrompt.rules,
+    requiredElements: ['exterior_wall', 'partition_wall', 'corridor', 'door', 'elevator_shaft'],
+    exampleJSON: floorPlanExamples.complexLayout
+  },
+  styles: {
+    [ElementType.SLAB]: { fill: '#1e293b', opacity: 0.15 },
+    [ElementType.WALL_EXTERNAL]: { fill: '#475569', opacity: 1 },
+    [ElementType.WALL_INTERNAL]: { fill: '#475569', opacity: 1 },
+    [ElementType.SHEAR_WALL]: { fill: '#475569', opacity: 1 },
+    [ElementType.PILLAR]: { fill: '#475569', opacity: 1 },
+    [ElementType.ELEVATOR_SHAFT]: { fill: '#991b1b', opacity: 1 },
+    [ElementType.STAIRCASE]: { fill: '#b45309', opacity: 1 },
+    [ElementType.SERVICE_SHAFT]: { fill: '#064e3b', opacity: 1 },
+    [ElementType.LIVING_ZONE]: { fill: '#1e293b', opacity: 0.15 },
+    [ElementType.BEDROOM_ZONE]: { fill: '#1e293b', opacity: 0.15 },
+    [ElementType.KITCHEN_ZONE]: { fill: '#1e293b', opacity: 0.15 },
+    [ElementType.BATHROOM_ZONE]: { fill: '#1e293b', opacity: 0.15 },
+    [ElementType.CORRIDOR]: { fill: '#1e293b', opacity: 0.15 },
+    [ElementType.STORAGE_ZONE]: { fill: '#1e293b', opacity: 0.15 },
+    'bed': { fill: '#4338ca', opacity: 1 },
+    'sofa': { fill: '#be123c', opacity: 1 },
+    'dining_table': { fill: '#78350f', opacity: 1 },
+    'desk': { fill: '#0e7490', opacity: 1 },
+    'wardrobe': { fill: '#6d28d9', opacity: 1 },
+    'toilet': { fill: '#f8fafc', opacity: 1 },
+    'sink': { fill: '#1d4ed8', opacity: 1 },
+    'cabinet': { fill: '#059669', opacity: 1 },
+    [ElementType.DOOR]: { fill: '#f8fafc', opacity: 1 },
+    [ElementType.WINDOW]: { fill: '#7dd3fc', opacity: 0.8 },
+  },
+  customDrawers: {
+      [ElementType.STAIRCASE]: (g, element, style, context) => {
+          const w = element.width;
+          const h = element.height;
+          const cx = w / 2;
+          const cy = h / 2;
+          
+          // Draw base rect
+          g.append("rect")
+           .attr("width", w).attr("height", h)
+           .attr("fill", style.fill)
+           .attr("opacity", style.opacity)
+           .attr("stroke", "none");
+
+          // Draw stair path
+          g.append("path")
+             .attr("d", w > h ? `M 10 ${cy} L ${w-10} ${cy} M ${w-20} ${cy-5} L ${w-10} ${cy} L ${w-20} ${cy+5}` : `M ${cx} 10 L ${cx} ${h-10} M ${cx-5} ${h-20} L ${cx} ${h-10} L ${cx+5} ${h-20}`)
+             .attr("stroke", "#ffffff").attr("fill", "none").attr("stroke-width", 1.5).attr("opacity", 0.4);
+      }
+  },
+  zOrder: [
+      ElementType.SLAB,
+      ElementType.LIVING_ZONE, ElementType.BEDROOM_ZONE, ElementType.KITCHEN_ZONE, ElementType.BATHROOM_ZONE, ElementType.STORAGE_ZONE,
+      ElementType.CORRIDOR, 
+      'cabinet', 'wardrobe', 'desk', 'dining_table', 'sofa', 'bed', 'toilet', 'sink',
+      ElementType.SERVICE_SHAFT, ElementType.STAIRCASE, ElementType.ELEVATOR_SHAFT,
+      ElementType.WALL_INTERNAL, ElementType.WALL_EXTERNAL, ElementType.SHEAR_WALL, ElementType.PILLAR,
+      ElementType.WINDOW, ElementType.DOOR
+  ],
+  postProcessAlgorithms: [
+      enforceOrthogonalWalls,
+      closeExteriorBoundary,
+      snapDoorsToWalls
+  ]
+};
+
 export const DEFAULT_SCENE_ID = ParkingScene.id;
 
 export const SCENE_REGISTRY: Record<string, SceneDefinition> = {
   [ParkingScene.id]: ParkingScene,
-  [GenericScene.id]: GenericScene
+  [GenericScene.id]: GenericScene,
+  [FloorPlanScene.id]: FloorPlanScene
 };

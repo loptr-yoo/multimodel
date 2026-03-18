@@ -1,8 +1,9 @@
 export enum ElementType {
+  // --- Parking / General ---
   GROUND = 'ground',
   PARKING_SPACE = 'parking_space',
-  ROAD = 'driving_lane', // Renamed for clarity based on prompt, mapped from 'road'
-  SIDEWALK = 'pedestrian_path', // Renamed for clarity
+  ROAD = 'driving_lane', 
+  SIDEWALK = 'pedestrian_path',
   RAMP = 'slope',
   PILLAR = 'pillar',
   WALL = 'wall',
@@ -16,7 +17,51 @@ export enum ElementType {
   SPEED_BUMP = 'deceleration_zone',
   FIRE_EXTINGUISHER = 'fire_extinguisher',
   LANE_LINE = 'ground_line',
-  CONVEX_MIRROR = 'convex_mirror'
+  CONVEX_MIRROR = 'convex_mirror',
+
+  // --- Floor Plan Structure ---
+  SLAB = 'floor_slab',
+  WALL_EXTERNAL = 'exterior_wall',
+  WALL_INTERNAL = 'partition_wall',
+  SHEAR_WALL = 'shear_wall',
+  // PILLAR exists above
+  ROOF_PARAPET = 'parapet',
+  
+  // --- Vertical Circulation ---
+  ELEVATOR_SHAFT = 'elevator_shaft',
+  // STAIRCASE exists above
+  SERVICE_SHAFT = 'pipe_shaft',
+  ELEVATOR_HALL = 'elevator_lobby',
+
+  // --- Horizontal Circulation ---
+  CORRIDOR = 'corridor',
+  LOBBY = 'lobby',
+  AISLE = 'aisle',
+
+  // --- Apertures ---
+  DOOR = 'door',
+  FIRE_DOOR = 'fire_door',
+  WINDOW = 'window',
+  // ENTRANCE/EXIT exist above
+
+  // --- Extensions ---
+  BALCONY = 'balcony',
+  TERRACE = 'terrace',
+  AIR_CON_LEDGE = 'ac_ledge',
+  WINDOW_SILL = 'window_sill',
+
+  // --- Functional Zones ---
+  KITCHEN_ZONE = 'kitchen',
+  BATHROOM_ZONE = 'bathroom',
+  LIVING_ZONE = 'living_room',
+  BEDROOM_ZONE = 'bedroom',
+  STORAGE_ZONE = 'storage',
+
+  // --- MEP / Safety ---
+  FIRE_HYDRANT = 'fire_hydrant',
+  SAFE_EXIT_SIGN = 'exit_sign',
+  HVAC_VENT = 'hvac_vent',
+  ELECTRICAL_BOX = 'dist_box'
 }
 
 export interface LayoutElement {
