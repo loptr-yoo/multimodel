@@ -287,29 +287,95 @@ export const mapToInternalLayout = (rawData: any): ParkingLayout => ({
 });
 
 /**
+ * 几何微调吸附算法：强行拉伸 GROUND 元素以填补极小缝隙 (1-15px)
+ */
+export const snapGroundToBoundaries = (layout: ParkingLayout): ParkingLayout => {
+    const SNAP_TOLERANCE = 15; // 允许吸附的最大缝隙像素
+
+    const elements = [...layout.elements];
+    const structural = elements.filter(e => [ElementType.ROAD, ElementType.WALL].includes(e.type as ElementType));
+    
+    const updatedElements = elements.map(el => {
+        if (el.type !== ElementType.GROUND) return el;
+
+        let newX = el.x;
+        let newY = el.y;
+        let newW = el.width;
+        let newH = el.height;
+
+        structural.forEach(target => {
+            // 水平方向判定 (X轴吸附)
+            if (Math.max(el.y, target.y) < Math.min(el.y + el.height, target.y + target.height)) {
+                // 左边缘缝隙
+                if (el.x > (target.x + target.width) && Math.abs(el.x - (target.x + target.width)) <= SNAP_TOLERANCE) {
+                    const diff = el.x - (target.x + target.width);
+                    newX -= diff;
+                    newW += diff;
+                }
+                // 右边缘缝隙
+                if ((el.x + el.width) < target.x && Math.abs((el.x + el.width) - target.x) <= SNAP_TOLERANCE) {
+                    newW += target.x - (el.x + el.width);
+                }
+            }
+
+            // 垂直方向判定 (Y轴吸附)
+            if (Math.max(el.x, target.x) < Math.min(el.x + el.width, target.x + target.width)) {
+                // 上边缘缝隙
+                if (el.y > (target.y + target.height) && Math.abs(el.y - (target.y + target.height)) <= SNAP_TOLERANCE) {
+                    const diff = el.y - (target.y + target.height);
+                    newY -= diff;
+                    newH += diff;
+                }
+                // 下边缘缝隙
+                if ((el.y + el.height) < target.y && Math.abs((el.y + el.height) - target.y) <= SNAP_TOLERANCE) {
+                    newH += target.y - (el.y + el.height);
+                }
+            }
+        });
+
+        return { ...el, x: newX, y: newY, width: newW, height: newH };
+    });
+
+    return { ...layout, elements: updatedElements };
+};
+
+
+/**
  * 后处理：坐标取整、添加填充
  */
 export const postProcessLayout = (layout: ParkingLayout): ParkingLayout => {
-  return {
+  let processed = {
     ...layout,
     elements: layout.elements.map(el => {
       const rx = Math.round(el.x);
       const ry = Math.round(el.y);
       const rw = Math.round(el.width);
       const rh = Math.round(el.height);
-      
       const isStructural = [ElementType.ROAD, ElementType.GROUND, ElementType.WALL].includes(el.type as ElementType);
-      const pad = isStructural ? 1 : 0; // 防止微小缝隙
-
+      
+      // 注意：这里可以保留 pad = 1，结合吸附算法效果更好
+      const pad = isStructural ? 1 : 0; 
+      
+      const cx = Math.max(0, rx);
+      const cy = Math.max(0, ry);
+      let cw = Math.max(1, rw + pad);
+      let ch = Math.max(1, rh + pad);
+      if (cx + cw > layout.width) cw = Math.max(1, layout.width - cx);
+      if (cy + ch > layout.height) ch = Math.max(1, layout.height - cy);
       return {
         ...el,
-        x: rx,
-        y: ry,
-        width: rw + pad,
-        height: rh + pad
+        x: cx,
+        y: cy,
+        width: cw,
+        height: ch
       };
     })
   };
+
+  // 【新增】：调用微缝吸附算法
+  processed = snapGroundToBoundaries(processed);
+
+  return processed;
 };
 
 export const mergeLayoutElements = (
@@ -512,6 +578,138 @@ export const cleanIntersections = (layout: ParkingLayout): ParkingLayout => {
         };
     }
     return layout;
+};
+
+export const autoRemoveOverlappingSpots = (layout: ParkingLayout, threshold = 0.2): ParkingLayout => {
+    const spots = layout.elements.filter(e => e.type === ElementType.PARKING_SPACE);
+    const blockers = layout.elements.filter(e =>
+        [
+            ElementType.WALL, ElementType.ROAD, ElementType.PILLAR, ElementType.STAIRCASE,
+            ElementType.ELEVATOR, ElementType.RAMP, ElementType.ENTRANCE, ElementType.EXIT,
+            ElementType.CHARGING_STATION, ElementType.FIRE_EXTINGUISHER, ElementType.SAFE_EXIT
+        ].includes(e.type as ElementType)
+    );
+    if (spots.length === 0 || blockers.length === 0) return layout;
+    const toRemove = new Set<string>();
+    const updates = new Map<string, LayoutElement>();
+    const computeMaxRatio = (spot: LayoutElement) => {
+        const spotArea = spot.width * spot.height;
+        if (spotArea <= 0) return 0;
+        let maxRatio = 0;
+        for (const b of blockers) {
+            const box = getIntersectionBox(spot, b);
+            if (!box) continue;
+            const overlapArea = box.width * box.height;
+            maxRatio = Math.max(maxRatio, overlapArea / spotArea);
+        }
+        return maxRatio;
+    };
+    const tryShift = (spot: LayoutElement) => {
+        const baseRatio = computeMaxRatio(spot);
+        if (baseRatio <= threshold) return spot;
+        let best = spot;
+        let bestRatio = baseRatio;
+        const steps = [4, 8, 12, 16, 20, 24];
+        for (const step of steps) {
+            const candidates = [
+                { x: spot.x + step, y: spot.y },
+                { x: spot.x - step, y: spot.y },
+                { x: spot.x, y: spot.y + step },
+                { x: spot.x, y: spot.y - step }
+            ];
+            for (const c of candidates) {
+                const nx = Math.min(Math.max(0, c.x), layout.width - spot.width);
+                const ny = Math.min(Math.max(0, c.y), layout.height - spot.height);
+                const moved = { ...spot, x: nx, y: ny };
+                const ratio = computeMaxRatio(moved);
+                if (ratio < bestRatio) {
+                    bestRatio = ratio;
+                    best = moved;
+                }
+                if (bestRatio <= threshold) return best;
+            }
+        }
+        return best;
+    };
+    spots.forEach(spot => {
+        const spotArea = spot.width * spot.height;
+        if (spotArea <= 0) return;
+        const maxRatio = computeMaxRatio(spot);
+        if (maxRatio > threshold) {
+            const shifted = tryShift(spot);
+            const shiftedRatio = computeMaxRatio(shifted);
+            if (shiftedRatio > threshold) toRemove.add(spot.id);
+            else updates.set(spot.id, shifted);
+        }
+    });
+    if (toRemove.size === 0 && updates.size === 0) return layout;
+    const next = layout.elements
+        .filter(e => !toRemove.has(e.id))
+        .map(e => (updates.has(e.id) ? updates.get(e.id)! : e));
+    return { ...layout, elements: next };
+};
+
+export const autoSnapRoadItems = (layout: ParkingLayout): ParkingLayout => {
+    const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
+    if (roads.length === 0) return layout;
+    const itemsOnRoad = new Set([ElementType.GUIDANCE_SIGN, ElementType.LANE_LINE, ElementType.SPEED_BUMP, ElementType.SIDEWALK]);
+    const updated = layout.elements.map(el => {
+        if (!itemsOnRoad.has(el.type as ElementType)) return el;
+        const best = roads.find(r =>
+            el.x >= r.x - 5 && el.x + el.width <= r.x + r.width + 5 &&
+            el.y >= r.y - 5 && el.y + el.height <= r.y + r.height + 5
+        );
+        let nearest: LayoutElement | null = best || null;
+        if (!nearest) {
+            let minD = Infinity;
+            const cx = el.x + el.width / 2;
+            const cy = el.y + el.height / 2;
+            for (const r of roads) {
+                const rcx = r.x + r.width / 2;
+                const rcy = r.y + r.height / 2;
+                const d = Math.abs(cx - rcx) + Math.abs(cy - rcy);
+                if (d < minD) {
+                    minD = d;
+                    nearest = r;
+                }
+            }
+        }
+        if (!nearest) return el;
+        const cx = el.x + el.width / 2;
+        const cy = el.y + el.height / 2;
+        if (el.type === ElementType.GUIDANCE_SIGN) {
+            const edge = 4;
+            const left = nearest.x + edge;
+            const right = nearest.x + nearest.width - edge;
+            const top = nearest.y + edge;
+            const bottom = nearest.y + nearest.height - edge;
+            const dx = Math.min(Math.abs(cx - left), Math.abs(cx - right));
+            const dy = Math.min(Math.abs(cy - top), Math.abs(cy - bottom));
+            let nx = cx;
+            let ny = cy;
+            if (dx < dy) nx = Math.abs(cx - left) < Math.abs(cx - right) ? left : right;
+            else ny = Math.abs(cy - top) < Math.abs(cy - bottom) ? top : bottom;
+            return { ...el, x: Math.round(nx - el.width / 2), y: Math.round(ny - el.height / 2) };
+        }
+        if (el.type === ElementType.LANE_LINE) {
+            const isHorizontal = nearest.width >= nearest.height;
+            if (isHorizontal) {
+                const ny = nearest.y + nearest.height / 2 - el.height / 2;
+                return { ...el, y: Math.round(ny), x: Math.round(nearest.x) };
+            }
+            const nx = nearest.x + nearest.width / 2 - el.width / 2;
+            return { ...el, x: Math.round(nx), y: Math.round(nearest.y) };
+        }
+        if (el.type === ElementType.SPEED_BUMP) {
+            const nx = Math.min(Math.max(cx, nearest.x + 4), nearest.x + nearest.width - 4);
+            const ny = Math.min(Math.max(cy, nearest.y + 4), nearest.y + nearest.height - 4);
+            return { ...el, x: Math.round(nx - el.width / 2), y: Math.round(ny - el.height / 2) };
+        }
+        const nx = Math.min(Math.max(cx, nearest.x + 2), nearest.x + nearest.width - 2);
+        const ny = Math.min(Math.max(cy, nearest.y + 2), nearest.y + nearest.height - 2);
+        return { ...el, x: Math.round(nx - el.width / 2), y: Math.round(ny - el.height / 2) };
+    });
+    return { ...layout, elements: updated };
 };
 
 /**
@@ -740,39 +938,38 @@ export const fixSmallGeometry = (layout: ParkingLayout): ParkingLayout => {
  */
 // aiCommonUtils.ts
 
+// services/aiCommonUtils.ts
+
 export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
-  // 1. 初始化空洞为全图
+  // 1. 过滤掉之前自动生成的GROUND（如果有），避免重复填充
+  const cleanElements = layout.elements.filter(el => !el.id.startsWith('auto_ground_void_'));
   let voids = [{ x: 0, y: 0, width: layout.width, height: layout.height }];
-  
-  // 2. 定义哪些元素被视为“实体”，需要从地面中挖除
-  // 注意：不要包含 LANE_LINE, GUIDANCE_SIGN 等覆盖物，地面应该铺在它们下面
+  // 2. 定义哪些类型是实心的，会遮挡GROUND
   const solidTypes = new Set<string>([
     ElementType.WALL,
     ElementType.ROAD,
     ElementType.RAMP,
     ElementType.ENTRANCE,
     ElementType.EXIT,
-    ElementType.GROUND
+    ElementType.GROUND,
+    ElementType.STAIRCASE,
+    ElementType.ELEVATOR,
+    ElementType.PILLAR
   ]);
-
-  // 3. 执行几何减法
-  for (const el of layout.elements) {
-    // 过滤：如果不是实体类型，或者是系统刚生成的补丁(防止递归)，则跳过
+  // 3. 遍历元素，逐步从voids中减去实心元素占据的区域
+  for (const el of cleanElements) {
     const type = normalizeType(el.type as any);
     if (!solidTypes.has(type)) continue;
-    if (el.id.startsWith('auto_ground_void_')) continue;
 
     const nextVoids = [];
     for (const v of voids) {
-      // subtractRectangle 需要在文件上方定义好
       nextVoids.push(...subtractRectangle(v, el));
     }
     voids = nextVoids;
   }
-  
-  // 4. 生成新地面元素
+  // 4. 将剩余的voids转换为GROUND元素，过滤掉过小的区域
   const newGrounds = voids
-    .filter(v => v.width >= 5 && v.height >= 5) // 过滤微小碎片
+    .filter(v => v.width >= 5 && v.height >= 5)
     .map((v, i) => ({
       id: `auto_ground_void_${Date.now()}_${i}`,
       type: ElementType.GROUND,
@@ -782,13 +979,14 @@ export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
       height: Math.round(v.height),
       rotation: 0
     }));
-
-  if (newGrounds.length === 0) return layout;
-
+  
+  if (newGrounds.length === 0) {
+    return { ...layout, elements: cleanElements };
+  }
+  // 5. 返回新的布局，GROUND元素放在最后以保证被其他元素覆盖
   return {
     ...layout,
-    // ✅ 关键修复：把新地面放在数组最前面（最底层），防止遮挡其他元素
-    elements: [...newGrounds, ...layout.elements] 
+    elements: [...newGrounds, ...cleanElements]
   };
 };
 
@@ -802,11 +1000,9 @@ export const enhanceLayoutWithGeometry = async (
 ): Promise<ParkingLayout> => {
   let current = layout;
 
-  onLog?.('🌑 扫描并填充空洞区域...');
-  current = fillVoidsWithGround(current);
-
   onLog?.('📐 执行几何填充算法...');
   current = fillParkingAutomatically(current);
+  current = autoRemoveOverlappingSpots(current, 0.2);
 
   onLog?.('🧹 清理交叉口...');
   current = cleanIntersections(current);
@@ -825,6 +1021,7 @@ export const enhanceLayoutWithGeometry = async (
 
   onLog?.('🧭 调整指示牌方向...');
   current = orientGuidanceSigns(current);
+  current = autoSnapRoadItems(current);
 
   return current;
 };

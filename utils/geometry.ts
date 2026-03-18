@@ -377,3 +377,24 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
 
   return violations;
 }
+
+export function calculateVoidRatio(layout: ParkingLayout, step: number = 10): number {
+  const coverTypes = new Set([ElementType.GROUND, ElementType.ROAD, ElementType.WALL]);
+  const elements = layout.elements.filter(e => coverTypes.has(e.type as ElementType));
+  const width = Math.max(1, Math.round(layout.width));
+  const height = Math.max(1, Math.round(layout.height));
+  const s = Math.max(1, Math.floor(step));
+  let total = 0;
+  let uncovered = 0;
+  for (let y = 0; y < height; y += s) {
+    for (let x = 0; x < width; x += s) {
+      total += 1;
+      const covered = elements.some(el =>
+        x >= el.x && x <= el.x + el.width &&
+        y >= el.y && y <= el.y + el.height
+      );
+      if (!covered) uncovered += 1;
+    }
+  }
+  return total === 0 ? 0 : uncovered / total;
+}

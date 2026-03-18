@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { ParkingLayout, ConstraintViolation } from './types';
 import { AIProvider } from './utils/aiConfig';
+import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from './utils/sceneRegistry';
 
 interface AppState {
   layout: ParkingLayout | null;
@@ -9,6 +10,8 @@ interface AppState {
   error: string | null;
   logs: string[];
   generationTime: number | null;
+
+  activeSceneId: string;
   
   // AI 模型相关
   selectedProvider: AIProvider;
@@ -25,6 +28,7 @@ interface AppState {
   setGenerationTime: (time: number | null) => void;
   setSelectedProvider: (provider: AIProvider) => void;
   setSelectedModel: (model: string) => void;
+  switchScene: (sceneId: string) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -34,6 +38,7 @@ export const useStore = create<AppState>((set) => ({
   error: null,
   logs: [],
   generationTime: null,
+  activeSceneId: DEFAULT_SCENE_ID,
   selectedProvider: 'gemini' as AIProvider,
   selectedModel: 'gemini-2.5-pro',
   availableModels: [],
@@ -47,4 +52,7 @@ export const useStore = create<AppState>((set) => ({
   setGenerationTime: (time) => set({ generationTime: time }),
   setSelectedProvider: (provider) => set({ selectedProvider: provider }),
   setSelectedModel: (model) => set({ selectedModel: model }),
+  switchScene: (sceneId) => {
+    if (SCENE_REGISTRY[sceneId]) set({ activeSceneId: sceneId });
+  },
 }));

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Layers, Map as MapIcon, Sparkles, Download, Key } from 'lucide-react';
+import { Layers, Map as MapIcon, Sparkles, Download, Key, Grid } from 'lucide-react';
 import { useStore } from '../store';
 import { ModelSelector } from './ModelSelector';
+import { SCENE_REGISTRY } from '../utils/sceneRegistry';
 
 interface Props {
-  onGenerate: (p: string) => void;
+  onGenerate: (p: string, sceneId: string) => void;
   onRefine: () => void;
   onDownload: () => void;
   onDownloadJson: () => void;
@@ -12,7 +13,7 @@ interface Props {
 }
 
 const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDownloadJson, onSelectKey }) => {
-  const { isGenerating, violations, layout, logs } = useStore();
+  const { isGenerating, violations, layout, logs, activeSceneId, switchScene } = useStore();
   const [prompt, setPrompt] = useState("Underground parking, rectangular, 2 main lanes, central islands.");
   const [showModelSelector, setShowModelSelector] = useState(false);
   const hasLayout = !!layout;
@@ -49,6 +50,25 @@ const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDo
       )}
 
       <div className="space-y-3">
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+            <Grid size={12} /> Scene
+          </label>
+          <select
+            value={activeSceneId}
+            onChange={(e) => switchScene(e.target.value)}
+            className="w-full bg-slate-800 border border-slate-700 rounded text-xs text-white p-2 focus:ring-1 focus:ring-blue-500 outline-none"
+          >
+            {Object.values(SCENE_REGISTRY).map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          {SCENE_REGISTRY[activeSceneId]?.description && (
+            <p className="text-[10px] text-slate-500 leading-tight">
+              {SCENE_REGISTRY[activeSceneId].description}
+            </p>
+          )}
+        </div>
         <label className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Design Prompt</label>
         <textarea 
           className="w-full bg-slate-800 border border-slate-700 rounded p-3 text-sm text-slate-200 h-24 resize-none focus:outline-none focus:border-blue-500 transition-colors"
@@ -57,7 +77,7 @@ const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDo
         />
         
         <div className="grid grid-cols-1 gap-3">
-            <button onClick={() => onGenerate(prompt)} disabled={isGenerating}
+            <button onClick={() => onGenerate(prompt, activeSceneId)} disabled={isGenerating}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold py-3 rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20 transition-all">
                 {isGenerating && !hasLayout ? <span className="animate-pulse">Analyzing...</span> : <><MapIcon size={16}/> Generate Layout</>}
             </button>

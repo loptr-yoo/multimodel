@@ -44,3 +44,42 @@ export interface ConstraintViolation {
   type: 'overlap' | 'out_of_bounds' | 'invalid_dimension' | 'placement_error' | 'connectivity_error' | 'width_mismatch';
   message: string;
 }
+
+export interface ElementStyle {
+  fill: string;
+  opacity: number;
+  stroke?: string;
+  strokeWidth?: number;
+  rx?: number;
+}
+
+export interface DrawerContext {
+  layout: ParkingLayout;
+  violations: ConstraintViolation[];
+}
+
+export type ElementDrawer = (
+  g: any,
+  element: LayoutElement,
+  style: ElementStyle,
+  context: DrawerContext
+) => void;
+
+export type LayoutAlgorithm = (layout: ParkingLayout) => ParkingLayout;
+
+export interface SceneDefinition {
+  id: string;
+  name: string;
+  description: string;
+  promptConfig: {
+    roleDefinition: string;
+    geometricRules: string;
+    requiredElements: string[];
+    exampleJSON: string;
+  };
+  styles: Record<string, ElementStyle>;
+  customDrawers?: Record<string, ElementDrawer>;
+  zOrder?: string[];
+  elementNormalization?: Record<string, string>;
+  postProcessAlgorithms?: LayoutAlgorithm[];
+}

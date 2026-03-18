@@ -350,9 +350,23 @@ export const safeParseResponse = async (
     const normalized = normalizeLayoutElementTypes(parsed);
     onLog?.(`[${options.provider}] 类型转换完成`);
 
-    // 验证数据结构
-    if (!validateParkingLayout(normalized)) {
-      onLog?.(`[${options.provider}] 警告: 数据结构可能不完整`);
+    const hasElements = Array.isArray((normalized as any).elements);
+    const hasPatch =
+      Array.isArray((normalized as any).modified_elements) ||
+      Array.isArray((normalized as any).new_elements) ||
+      Array.isArray((normalized as any).deleted_ids);
+    if (hasElements && !hasPatch) {
+      if (!validateParkingLayout(normalized)) {
+        const snapshot = JSON.stringify(normalized).slice(0, 2000);
+        const error = new Error(`数据结构不完整: ${snapshot}`);
+        onLog?.(`[${options.provider}] Error: ${error.message}`);
+        throw error;
+      }
+    } else if (!hasElements && !hasPatch) {
+      const snapshot = JSON.stringify(normalized).slice(0, 2000);
+      const error = new Error(`响应缺少 elements/patch 字段: ${snapshot}`);
+      onLog?.(`[${options.provider}] Error: ${error.message}`);
+      throw error;
     }
 
     return normalized;

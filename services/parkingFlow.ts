@@ -4,10 +4,11 @@
  * 适用于所有 LLM Provider
  */
 
-import { ParkingLayout, ConstraintViolation } from '../types';
+import { ParkingLayout, ConstraintViolation, ElementType } from '../types';
 import { PROMPTS } from '../utils/prompts';
+import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 import { safeParseResponse, normalizeLayoutElementTypes } from './responseParser';
-import { validateLayout } from '../utils/geometry';
+import { validateLayout, calculateVoidRatio } from '../utils/geometry';
 import { LLMClient, LLMConfig } from './llmProvider';
 import {
   mapToInternalLayout,
@@ -21,12 +22,40 @@ import {
   enhanceLayoutWithGeometry,
   fillVoidsWithGround,
   calculateScore,
-  sleep
+  sleep,
+  normalizeType
 } from './aiCommonUtils';
 
 // --- 配置常量 ---
 const MAX_RETRIES = 3;
 const MAX_FIX_PASSES = 4;
+
+const getActiveScene = (sceneId?: string) => {
+  const key = sceneId || DEFAULT_SCENE_ID;
+  return SCENE_REGISTRY[key] || SCENE_REGISTRY[DEFAULT_SCENE_ID];
+};
+
+const applySceneTypeNormalization = (raw: any, sceneId?: string): any => {
+  const scene = getActiveScene(sceneId);
+  const map = scene.elementNormalization || {};
+  const normalizeOne = (el: any) => {
+    if (!el || typeof el !== 'object') return el;
+    const rawType = el.t ?? el.type;
+    if (!rawType) return el;
+    const key = String(rawType).toLowerCase();
+    const mapped = map[key];
+    if (!mapped) return el;
+    if (el.t != null) return { ...el, t: mapped };
+    return { ...el, type: mapped };
+  };
+  const normalizeList = (arr: any) => (Array.isArray(arr) ? arr.map(normalizeOne) : arr);
+  return {
+    ...raw,
+    elements: normalizeList(raw?.elements),
+    new_elements: normalizeList(raw?.new_elements),
+    modified_elements: normalizeList(raw?.modified_elements)
+  };
+};
 
 /**
  * 带有重试机制的 LLM 调用
@@ -60,14 +89,33 @@ const runIterativeFix = async (
   layout: ParkingLayout,
   client: LLMClient,
   config: LLMConfig,
-  onLog?: (msg: string) => void
+  onLog?: (msg: string) => void,
+  options: { freezeStructural?: boolean } = {}
 ): Promise<ParkingLayout> => {
   let currentLayout = layout;
   let lastScore = Infinity;
+  const structuralTypes = new Set<string>([
+    ElementType.WALL,
+    ElementType.ROAD,
+    ElementType.GROUND,
+    ElementType.RAMP,
+    ElementType.ENTRANCE,
+    ElementType.EXIT
+  ]);
 
   for (let pass = 1; pass <= MAX_FIX_PASSES; pass++) {
     const violations = validateLayout(currentLayout);
     const score = calculateScore(violations);
+    if (violations.length > 0) {
+      const counts = violations.reduce((acc: Record<string, number>, v) => {
+        acc[v.type] = (acc[v.type] || 0) + 1;
+        return acc;
+      }, {});
+      const summary = Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(', ');
+      const samples = violations.slice(0, 6).map(v => `${v.type}:${v.elementId}`).join(', ');
+      onLog?.(`🔎 违规统计: ${summary}`);
+      onLog?.(`🔎 违规样例: ${samples}`);
+    }
 
     if (score === 0) {
       onLog?.(`✅ [Fix Loop] 布局完美 (Pass ${pass}, Score 0)`);
@@ -76,6 +124,10 @@ const runIterativeFix = async (
     
     // 如果分数没有改善且不是第一轮，提前退出（防止死循环）
     if (score >= lastScore && pass > 1) {
+      if (options.freezeStructural) {
+        onLog?.(`🛑 [Fix Loop] 优化停滞 (Score ${score}), 停止修复`);
+        break;
+      }
       const autoPatches = generateAutoConnectivityPatches(currentLayout);
       if (autoPatches.length > 0) {
         onLog?.(`🧩 触发自动补丁: ${autoPatches.length} 个`);
@@ -124,13 +176,32 @@ const runIterativeFix = async (
       
       if (patches.length > 0) {
         if (parsed.modified_elements && !parsed.elements) {
-      const cleaned = normalizePartialPatches(patches);
-      currentLayout = mergePatchesToLayout(currentLayout, cleaned, deletedIds, { mode: 'strict' });
+          let cleaned = normalizePartialPatches(patches);
+          let filteredDeletes = deletedIds;
+          if (options.freezeStructural) {
+            cleaned = cleaned.filter(p => {
+              const pid = String(p.id ?? p.element_id ?? '');
+              const existing = currentLayout.elements.find(el => el.id === pid);
+              const t = normalizeType((existing?.type as any) ?? (p.type ?? p.t));
+              return !structuralTypes.has(t);
+            });
+            filteredDeletes = deletedIds.filter(id => {
+              const existing = currentLayout.elements.find(el => el.id === id);
+              const t = normalizeType(existing?.type as any);
+              return !structuralTypes.has(t);
+            });
+          }
+          currentLayout = mergePatchesToLayout(currentLayout, cleaned, filteredDeletes, { mode: 'strict' });
         } else {
-          const full = mapToInternalLayout({ width: currentLayout.width, height: currentLayout.height, elements: patches });
-          currentLayout = { ...currentLayout, elements: full.elements };
+          if (options.freezeStructural) {
+            onLog?.(`⚠️ [Fix Loop] 忽略全量修复以保护骨架`);
+          } else {
+            const full = mapToInternalLayout({ width: currentLayout.width, height: currentLayout.height, elements: patches });
+            currentLayout = { ...currentLayout, elements: full.elements };
+          }
         }
       } else {
+        if (options.freezeStructural) continue;
         const autoPatches = generateAutoConnectivityPatches(currentLayout);
         if (autoPatches.length > 0) {
           onLog?.(`🧩 模型返回空补丁，应用自动补丁 ${autoPatches.length} 个`);
@@ -176,7 +247,8 @@ export const executeGeneration = async (
   client: LLMClient,
   apiKey: string,
   model: string,
-  onLog?: (msg: string) => void
+  onLog?: (msg: string) => void,
+  sceneId?: string
 ): Promise<ParkingLayout> => {
   const config: LLMConfig = {
     apiKey, model,
@@ -185,6 +257,8 @@ export const executeGeneration = async (
   };
 
   onLog?.(` [${client.providerName}] 开始生成...`);
+  const scene = getActiveScene(sceneId);
+  const isParkingScene = scene.id === DEFAULT_SCENE_ID;
 
   let layout: ParkingLayout | null = null;
   let lastError: Error | null = null;
@@ -202,17 +276,18 @@ export const executeGeneration = async (
 
       // 发送 Single-Shot Prompt (不带 System Prompt 以集中权重)
       const responseText = await callLLMWithRetry(client, [
-        { role: 'user', content: PROMPTS.generation(prompt) }
+        { role: 'user', content: PROMPTS.generation(prompt, scene) }
       ], config, onLog);
 
       // 解析
-      const rawData = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
+      const rawParsed = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
+      const rawData = applySceneTypeNormalization(rawParsed, sceneId);
       layout = mapToInternalLayout(rawData);
       
       if (rawData.reasoning_plan && onLog) onLog(`🧠 Plan: ${rawData.reasoning_plan}`);
 
       // 3. 立即验证完整性
-      validateGeneratedContent(layout);
+      if (isParkingScene) validateGeneratedContent(layout);
 
       // 如果验证通过，跳出循环
       onLog?.(`✅ 初步生成成功: 包含 ${layout.elements.length} 个元素`);
@@ -230,13 +305,17 @@ export const executeGeneration = async (
 
   if (!layout) throw lastError || new Error("Unknown generation error");
 
-  // 3. 自动修复循环
+  if (!isParkingScene) return postProcessLayout(layout);
+
   layout = await runIterativeFix(layout, client, config, onLog);
-
-  // 4. 自动填充空洞 (确保粗粒度图也没有黑洞)
   layout = fillVoidsWithGround(layout);
-
-  return postProcessLayout(layout);
+  layout = postProcessLayout(layout);
+  const voidRatio = calculateVoidRatio(layout);
+  if (voidRatio > 0.005) {
+    const msg = `Void ratio too high before refinement: ${(voidRatio * 100).toFixed(3)}%`;
+    onLog?.(`❌ ${msg}`);
+  }
+  return layout;
 };
 
 /**
@@ -247,17 +326,26 @@ export const executeRefinement = async (
   client: LLMClient,
   apiKey: string,
   model: string,
-  onLog?: (msg: string) => void
+  onLog?: (msg: string) => void,
+  sceneId?: string
 ): Promise<ParkingLayout> => {
+  const scene = getActiveScene(sceneId);
+  const isParkingScene = scene.id === DEFAULT_SCENE_ID;
   // 细化阶段 AI 负责生成新元素
   const config: LLMConfig = { apiKey, model, temperature: 0.2, maxTokens: 8192 };
+  const voidRatio = calculateVoidRatio(currentLayout);
+  if (isParkingScene && voidRatio > 0.005) {
+    const msg = `Void ratio too high before refinement: ${(voidRatio * 100).toFixed(3)}%`;
+    onLog?.(`❌ ${msg}`);
+    // throw new Error(msg);
+  }
 
   onLog?.(`✨ [${client.providerName}] 开始细化布局 (增量模式)...`);
 
   // 1. 输入瘦身
-  const structuralElements = currentLayout.elements.filter(e => 
-    ['WALL', 'ROAD', 'driving_lane', 'GROUND', 'ground', 'wall'].includes(e.type)
-  );
+  const structuralElements = isParkingScene
+    ? currentLayout.elements.filter(e => ['WALL', 'ROAD', 'driving_lane', 'GROUND', 'ground', 'wall'].includes(e.type))
+    : currentLayout.elements;
   
   const simplified = structuralElements.map(e => ({
     id: e.id, t: e.type, x: Math.round(e.x), y: Math.round(e.y), w: Math.round(e.width), h: Math.round(e.height)
@@ -266,17 +354,37 @@ export const executeRefinement = async (
   try {
     // 2. AI 生成新细节 (柱子、标线等)
     const responseText = await callLLMWithRetry(client, [
-      { role: 'user', content: PROMPTS.optimizeSystemPrompt({ elements: simplified }, currentLayout.width, currentLayout.height) }
+      { role: 'user', content: PROMPTS.optimizeSystemPrompt({ elements: simplified }, currentLayout.width, currentLayout.height, scene) }
     ], config, onLog);
 
-    const rawData = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
+    const parsed = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
+    const rawData = applySceneTypeNormalization(parsed, sceneId);
 
     // 🧠 分支逻辑：全量 vs 增量（修复数组拼接导致的重复/重叠问题）
     let layout: ParkingLayout = currentLayout;
-    if (rawData.modified_elements && Array.isArray(rawData.modified_elements)) {
+    if (isParkingScene && rawData.modified_elements && Array.isArray(rawData.modified_elements)) {
       onLog?.(`🩹 应用修改补丁: ${rawData.modified_elements.length} 个`);
-      const updates = normalizePartialPatches(rawData.modified_elements);
-      layout = mergePatchesToLayout(currentLayout, updates, rawData.deleted_ids || [], { mode: 'strict' });
+      let updates = normalizePartialPatches(rawData.modified_elements);
+      const structuralTypes = new Set<string>([
+        ElementType.WALL,
+        ElementType.ROAD,
+        ElementType.GROUND,
+        ElementType.RAMP,
+        ElementType.ENTRANCE,
+        ElementType.EXIT
+      ]);
+      updates = updates.filter(p => {
+        const pid = String(p.id ?? p.element_id ?? '');
+        const existing = currentLayout.elements.find(el => el.id === pid);
+        const t = normalizeType((existing?.type as any) ?? (p.type ?? p.t));
+        return !structuralTypes.has(t);
+      });
+      const filteredDeletes = (rawData.deleted_ids || []).filter((id: string) => {
+        const existing = currentLayout.elements.find(el => el.id === id);
+        const t = normalizeType(existing?.type as any);
+        return !structuralTypes.has(t);
+      });
+      layout = mergePatchesToLayout(currentLayout, updates, filteredDeletes, { mode: 'strict' });
     } else if (rawData.new_elements && Array.isArray(rawData.new_elements)) {
       onLog?.(`➕ 应用新增元素: ${rawData.new_elements.length} 个`);
       const adds = mapToInternalLayout({
@@ -310,15 +418,17 @@ export const executeRefinement = async (
     
 
     layout = fixSmallGeometry(layout);
-    // 3. 几何增强 (铺车位、加充电桩)
-    // 这一步会产生大量 PARKING_SPACE，可能会与 AI 生成的柱子重叠
-    layout = await enhanceLayoutWithGeometry(layout, onLog);
+    if (isParkingScene) {
+      layout = await enhanceLayoutWithGeometry(layout, onLog);
+    }
 
     // 🟢 4. 最终修复 (The Final Polish)
     onLog?.(`🔧 执行最终冲突微调 (增量安全模式)...`);
     
     // 使用极低温度 (0.0) 确保它只做数学题，不发挥想象力
-    layout = await runIterativeFix(layout, client, { ...config, temperature: 0.0 }, onLog);
+    if (isParkingScene) {
+      layout = await runIterativeFix(layout, client, { ...config, temperature: 0.0 }, onLog, { freezeStructural: true });
+    }
 
     onLog?.(`✅ 细化流程全部完成`);
     return postProcessLayout(layout);

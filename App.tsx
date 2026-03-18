@@ -17,7 +17,7 @@ declare global {
 
 const App: React.FC = () => {
   const { 
-    layout, violations, isGenerating, error, logs, selectedProvider, selectedModel,
+    layout, violations, isGenerating, error, logs, selectedProvider, selectedModel, activeSceneId,
     setLayout, setViolations, setIsGenerating, setError, addLog, setGenerationTime, clearLogs 
   } = useStore();
 
@@ -42,7 +42,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handleGenerate = async (prompt: string) => {
+  const handleGenerate = async (prompt: string, sceneId: string) => {
     setIsGenerating(true);
     setError(null);
     clearLogs();
@@ -60,7 +60,7 @@ const App: React.FC = () => {
         provider: selectedProvider,
         model: selectedModel,
         apiKey,
-      }, addLog);
+      }, addLog, sceneId);
       
       setLayout(newLayout);
       setViolations([]); 
@@ -101,7 +101,7 @@ const App: React.FC = () => {
         provider: selectedProvider,
         model: selectedModel,
         apiKey,
-      }, addLog);
+      }, addLog, activeSceneId);
       
       if (augmented && augmented.elements.length > 0) {
         setLayout(augmented);

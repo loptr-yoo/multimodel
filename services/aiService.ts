@@ -20,7 +20,8 @@ export interface AIServiceOptions {
 export const generateLayout = async (
   prompt: string,
   options: AIServiceOptions,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  sceneId?: string
 ): Promise<ParkingLayout> => {
   const { provider, model, apiKey } = options;
 
@@ -32,7 +33,7 @@ export const generateLayout = async (
   const client = createLLMClient(provider);
 
   // 2. 执行统一生成流程
-  return await executeGeneration(prompt, client, apiKey, model, onProgress);
+  return await executeGeneration(prompt, client, apiKey, model, onProgress, sceneId);
 };
 
 /**
@@ -41,7 +42,8 @@ export const generateLayout = async (
 export const augmentLayoutWithRoads = async (
   layout: ParkingLayout,
   options: AIServiceOptions,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  sceneId?: string
 ): Promise<ParkingLayout> => {
   const { provider, model, apiKey } = options;
 
@@ -53,7 +55,7 @@ export const augmentLayoutWithRoads = async (
   const client = createLLMClient(provider);
 
   // 2. 执行统一细化流程
-  return await executeRefinement(layout, client, apiKey, model, onProgress);
+  return await executeRefinement(layout, client, apiKey, model, onProgress, sceneId);
 };
 
 // --- 辅助函数保持不变 ---

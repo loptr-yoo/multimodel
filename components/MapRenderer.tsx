@@ -2,11 +2,12 @@ import React, { useEffect, useRef, forwardRef, useImperativeHandle } from 'react
 import * as d3 from 'd3';
 import { ElementType, LayoutElement } from '../types';
 import { useStore } from '../store';
+import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 
 const ELEMENT_STYLES: Record<string, { fill: string; opacity: number; stroke?: string; strokeWidth?: number }> = {
   [ElementType.GROUND]: { fill: '#334155', opacity: 1 }, 
   [ElementType.ROAD]: { fill: '#1e293b', opacity: 1 },   
-  [ElementType.PARKING_SPACE]: { fill: '#3b82f6', opacity: 0.9 },
+  [ElementType.PARKING_SPACE]: { fill: '#3b82f6', opacity: 1 },
   [ElementType.SIDEWALK]: { fill: '#1e293b', opacity: 1 }, 
   [ElementType.RAMP]: { fill: '#c026d3', opacity: 1 },
   [ElementType.PILLAR]: { fill: '#94a3b8', opacity: 1 },
@@ -31,7 +32,7 @@ export interface MapRendererHandle {
 
 const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
   const svgRef = useRef<SVGSVGElement>(null);
-  const { layout, violations } = useStore();
+  const { layout, violations, activeSceneId } = useStore();
 
   useImperativeHandle(ref, () => ({
     downloadJpg: () => {
@@ -101,8 +102,11 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
        .style("shape-rendering", "crispEdges"); 
     
     const mainGroup = svg.append("g").attr("class", "main-group");
+
+    const activeScene = SCENE_REGISTRY[activeSceneId] || SCENE_REGISTRY[DEFAULT_SCENE_ID];
+    const sceneStyles = activeScene?.styles || ELEMENT_STYLES;
     
-    const zOrder = [
+    const defaultZOrder = [
         ElementType.WALL, 
         ElementType.GROUND, 
         ElementType.ROAD, 
@@ -118,6 +122,7 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
         ElementType.FIRE_EXTINGUISHER,
         ElementType.GUIDANCE_SIGN
     ];
+    const zOrder = (activeScene?.zOrder && activeScene.zOrder.length > 0) ? activeScene.zOrder : defaultZOrder;
     
     const sortedElements = [...elements].sort((a, b) => {
       const idxA = zOrder.indexOf(a.type as ElementType);
@@ -133,11 +138,17 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
       .attr("transform", d => `translate(${d.x}, ${d.y})`)
       .each(function(this: any, d) {
         const g = d3.select(this);
-        const style = ELEMENT_STYLES[d.type as string] || { fill: '#ff00ff', opacity: 1 };
+        const style = sceneStyles[d.type as string] || { fill: '#64748b', opacity: 0.6 };
+        const customDrawer = activeScene?.customDrawers?.[d.type as string];
         const w = d.width;
         const h = d.height;
         const cx = w / 2;
         const cy = h / 2;
+
+        if (customDrawer) {
+          customDrawer(g, d as any, style as any, { layout, violations } as any);
+          return;
+        }
 
         if (d.type === ElementType.LANE_LINE) {
              const isVertical = h > w;
@@ -260,7 +271,7 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
         const scale = Math.min(pw / width, ph / height) * 0.9;
         svg.call(zoom.transform, d3.zoomIdentity.translate((pw - width * scale) / 2, (ph - height * scale) / 2).scale(scale));
     }
-  }, [layout, violations]);
+  }, [layout, violations, activeSceneId]);
 
   return (
     <div className="w-full h-full bg-slate-950 rounded-lg overflow-hidden border border-slate-800 shadow-inner relative">

@@ -1,4 +1,4 @@
-import { ParkingLayout, ConstraintViolation } from '../types';
+import { ParkingLayout, ConstraintViolation, SceneDefinition } from '../types';
 
 const PROTOCOLS = {
   FULL_STATE: `
@@ -81,63 +81,56 @@ Design principles:
 - Include pedestrian paths
 - Place support infrastructure logically`,
 
-  generation: (description: string) => `
-  You are an **Architectural Spatial Planner**. 
-  Generate a COARSE-GRAINED JSON underground parking layout (0,0 at top-left) for: "${description}".
-  
+  generation: (description: string, scene: SceneDefinition) => `
+  You are an **${scene.promptConfig.roleDefinition}**.
+  Generate a COARSE-GRAINED JSON layout (0,0 at top-left) for: "${description}".
+
   **CANVAS CONSTRAINTS**: Width: 800, Height: 600.
-  
+
   **CRITICAL GEOMETRIC RULES**:
-  1. **CLOSED LOOP PERIMETER**: Walls MUST overlap or touch at corners. NO perimeter gaps.
-  2. **The "Racetrack" Pattern**:
-     - Create a main loop of 'driving_lane' (Roads).
-     - **MANDATORY SETBACK**: The Road Loop must be **INSET** from the perimeter walls.
-  3. **'ground' Elements (CRITICAL FOR VOID FIXING)**:
-     - **NO FLOATING ISLANDS**: Every 'ground' element MUST touch a 'driving_lane' or another 'ground' on all sides.
-     - **INTERNAL FILL**: The empty space INSIDE the road loop (the "donut hole") must be **100% FILLED** with 'ground' strips.
-     - **STRIP LOGIC**: If splitting the center into multiple 'ground' strips, they must **TOUCH** (e.g., y of Strip B = y + height of Strip A). **DO NOT leave black gaps between strips.**
-  4. **Boundary Snapping**:
-     - 'entrance' and 'exit' MUST touch the edges of the canvas.
-  5. **ZERO-VOID POLICY**:
-     - The final layout must look like a **Solid Mosaic**. 
-     - Visible Background Color = ERROR. 
-     - Any space not occupied by a 'wall' or 'driving_lane' MUST be covered by 'ground'.
-  
-  **TOKEN SAVING INSTRUCTION**: 
-  - The JSON response will be cut off if it is too long. 
-  - **KEEP 'reasoning_plan' EXTREMELY SHORT (Max 1 sentence).**
-  - Devote all tokens to generating the 'elements' list.
+  ${scene.promptConfig.geometricRules}
+
+  **TOKEN SAVING INSTRUCTION**:
+  - Keep 'reasoning_plan' extremely short (max 1 sentence).
+  - Use compact keys: t/x/y/w/h where possible.
 
   **REQUIRED ELEMENTS**:
-  - 'wall': Perimeter boundaries.
-  - 'driving_lane': Main vehicle arteries (Width ~60).
-  - 'ground': Parking islands (Must fill all voids).
-  - 'entrance' / 'exit': 40x20 blocks on boundary.
-  - 'slope': 40x60 connectors joining Entrance/Exit to Roads.
+  ${scene.promptConfig.requiredElements.map(e => `- '${e}'`).join('\n')}
 
   **JSON EXAMPLE**:
-  \`\`\`json
-  {
-    "reasoning_plan": "Racetrack road with solid central island ground strips touching each other.",
-    "width": 800, "height": 600,
-    "elements": [
-      {"t": "wall", "x": 0, "y": 0, "w": 800, "h": 20},
-      {"t": "driving_lane", "x": 60, "y": 60, "w": 680, "h": 60},
-      {"t": "ground", "x": 120, "y": 120, "w": 560, "h": 100}, 
-      {"t": "ground", "x": 120, "y": 220, "w": 560, "h": 100} 
-    ]
-  }
-  \`\`\`
-  // Note in example: y:220 is exactly y:120 + h:100. They touch.
+  ${scene.promptConfig.exampleJSON}
   `,
 
-  refinement: (simplifiedLayout: any, width: number, height: number) => `
+  refinement: (simplifiedLayout: any, width: number, height: number, scene: SceneDefinition) => {
+    const isParking = scene.promptConfig.requiredElements.includes('driving_lane') || scene.promptConfig.requiredElements.includes('slope');
+    if (!isParking) {
+      const allowed = Object.keys(scene.styles || {}).join(', ');
+      return `
+    You are a **2D Scene Detailer**.
+    Task: Add NEW detail elements to the existing layout without changing structure.
+
+    Canvas: ${width}x${height}
+    Existing Elements:
+    ${JSON.stringify(simplifiedLayout.elements)}
+
+    Allowed types: ${allowed || 'any lowercase strings'}
+
+    Rules:
+    - Do NOT modify or delete existing elements.
+    - Only add new elements.
+    - Use compact keys: t/x/y/w/h.
+
+    Output JSON:
+    { "reasoning_plan":"...", "new_elements":[ { "t":"...", "x":0, "y":0, "w":10, "h":10 } ] }
+      `;
+    }
+    return `
     You are a **Spatial Algorithm Engine**.
     Task: Inject NEW detailed structural and facility elements into the existing layout.
 
-    **INPUT DATA**: 
+    **INPUT DATA**:
     - Canvas: ${width}x${height}
-    - Existing Elements: 
+    - Existing Elements:
     ${JSON.stringify(simplifiedLayout.elements)}
 
     **CRITICAL DESIGN RULES**:
@@ -153,33 +146,38 @@ Design principles:
     - **DO NOT** return the existing 'wall', 'driving_lane', or 'ground' elements provided in INPUT.
     - **ONLY** return the **NEW** elements you are creating in this step.
 
-    **GENERATION TASKS**:
-    1. **Layer 1: Structural Grid ('pillar')**
-       - Place 'pillar' (size 10x10) at corners of 'ground' areas.
-       - Max 1 pillar every 100-150 units. Sparsity is key.
-       - Pillars provide structural integrity to the parking islands.
-    2. **Layer 2: Road Logic**
-       - 'ground_line': Dashed lines (width 2) in center of 'driving_lane' areas.
-       - 'guidance_sign': (10x10) at road junctions to indicate Exit direction.
-       - 'deceleration_zone': (10x40) Place near Entrances/Exits.
-
-    3. **Layer 3: Pedestrian Paths ('pedestrian_path')**
-       - Draw zebra crossings connecting 'ground' areas across roads.
-    4. **Layer 4: Facilities**
-       - 'staircase' (30x30) + 'safe_exit' (20x20) placed together on 'ground' areas near the corners.
-       - 'elevator' (20x20), 'fire_extinguisher' (10x10) spread out.
+    **SCENE RULES**:
+    ${scene.promptConfig.geometricRules}
 
     **OUTPUT JSON FORMAT**:
     {
       "reasoning_plan": "Added [X] pillars and [Y] signs...",
       "new_elements": [
-         { "t": "pillar", "x": 100, "y": 100, "w": 10, "h": 10 },
-         { "t": "ground_line", "x": ..., "y": ..., "w": ..., "h": ... }
+         { "t": "pillar", "x": 100, "y": 100, "w": 10, "h": 10 }
       ]
     }
-  `,
+    `;
+  },
 
-  fix: (layout: ParkingLayout, violations: ConstraintViolation[]) => `
+  fix: (layout: ParkingLayout, violations: ConstraintViolation[], scene: SceneDefinition) => {
+    const isParking = scene.promptConfig.requiredElements.includes('driving_lane') || scene.promptConfig.requiredElements.includes('slope');
+    if (!isParking) {
+      return `
+    ${ROLES.FIXER}
+    ${PROTOCOLS.PATCH_ONLY}
+    You are a **Scene Constraint Fixer**.
+    INPUT: ${layout.width}x${layout.height} Canvas.
+    VIOLATIONS: ${JSON.stringify(violations)}
+
+    Rules:
+    - Only fix elements referenced by violations.
+    - Prefer moving/resizing; delete only when necessary.
+
+    Output JSON:
+    { "reasoning_plan":"...", "modified_elements":[...], "deleted_ids":[...] }
+      `;
+    }
+    return `
     ${ROLES.FIXER}
     ${PROTOCOLS.PATCH_ONLY}
     You are a **Topological Constraint Solver**.
@@ -188,6 +186,7 @@ Design principles:
     **VIOLATIONS**: ${JSON.stringify(violations)}
 
     **CRITICAL RULES**:
+    ${scene.promptConfig.geometricRules}
     1. **ZERO-VOID / GAP FILLING**: 
        - Any narrow gap between a 'driving_lane' and a 'wall' (or another road) MUST be filled by **EXTENDING THE GROUND**, NOT by creating a new road.
        - **Action**: If you see a small gap, resize the adjacent 'ground' to touch the road. **NEVER SHRINK** 'ground' elements to fix overlaps with 'driving_lane' or 'wall' if it creates gaps.
@@ -224,21 +223,22 @@ Design principles:
          { "id": "id_1", "t": "...", "x": ..., "y": ..., "w": ..., "h": ... }
       ]
     }
-  `,
-  generateSystemPrompt: (description: string) => `
+    `;
+  },
+  generateSystemPrompt: (description: string, scene: SceneDefinition) => `
  ${ROLES.GENERATOR}
  ${PROTOCOLS.FULL_STATE}
- ${PROMPTS.generation(description)}
+ ${PROMPTS.generation(description, scene)}
  `,
-  optimizeSystemPrompt: (simplifiedLayout: any, width: number, height: number) => `
+  optimizeSystemPrompt: (simplifiedLayout: any, width: number, height: number, scene: SceneDefinition) => `
  ${ROLES.OPTIMIZER}
  ${PROTOCOLS.PATCH_ONLY}
- ${PROMPTS.refinement(simplifiedLayout, width, height)}
+ ${PROMPTS.refinement(simplifiedLayout, width, height, scene)}
  `,
-  fixSystemPrompt: (layout: ParkingLayout, violations: ConstraintViolation[]) => `
+  fixSystemPrompt: (layout: ParkingLayout, violations: ConstraintViolation[], scene: SceneDefinition) => `
  ${ROLES.FIXER}
  ${PROTOCOLS.PATCH_ONLY}
- ${PROMPTS.fix(layout, violations)}
+ ${PROMPTS.fix(layout, violations, scene)}
  `,
   fixPrompt: (violations: any[]) => `
  CONTEXT: The current layout has logical errors. 
