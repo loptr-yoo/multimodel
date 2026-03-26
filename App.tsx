@@ -2,7 +2,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import MapRenderer, { MapRendererHandle } from './components/MapRenderer';
 import LayoutControl from './components/LayoutControl';
-import { generateLayout, augmentLayout, getApiKeyFromEnv } from './services/aiService';
+import { generateBuilding, augmentLayout, getApiKeyFromEnv } from './services/aiService';
 import { useStore } from './store';
 
 // 声明 aistudio 全局接口
@@ -17,8 +17,8 @@ declare global {
 
 const App: React.FC = () => {
   const { 
-    layout, violations, isGenerating, error, logs, selectedProvider, selectedModel, activeSceneId,
-    setLayout, setViolations, setIsGenerating, setError, addLog, setGenerationTime, clearLogs 
+    layout, buildingData, activeFloorId, violations, isGenerating, error, logs, selectedProvider, selectedModel, activeSceneId,
+    setLayout, setBuildingData, setActiveFloor, updateFloorLayout, setViolations, setIsGenerating, setError, addLog, setGenerationTime, clearLogs 
   } = useStore();
 
   const mapRef = useRef<MapRendererHandle>(null);
@@ -56,13 +56,23 @@ const App: React.FC = () => {
       }
 
       addLog(`使用 ${selectedModel} 模型...`);
-      const newLayout = await generateLayout(prompt, {
+      setBuildingData(null);
+      setActiveFloor('');
+
+      const newBuilding = await generateBuilding(prompt, {
         provider: selectedProvider,
         model: selectedModel,
         apiKey,
       }, addLog, sceneId);
       
-      setLayout(newLayout);
+      setBuildingData(newBuilding);
+      const floorIds = Object.keys(newBuilding.floors);
+      if (floorIds.length > 0) {
+        const firstFloor = floorIds[0];
+        setActiveFloor(firstFloor);
+        setLayout(newBuilding.floors[firstFloor]);
+      }
+      
       setViolations([]); 
       addLog("Generation complete.");
     } catch (e: any) {
@@ -105,6 +115,9 @@ const App: React.FC = () => {
       
       if (augmented && augmented.elements.length > 0) {
         setLayout(augmented);
+        if (activeFloorId) {
+          updateFloorLayout(activeFloorId, augmented);
+        }
         setViolations([]);
         addLog("Refinement complete.");
       }
@@ -170,6 +183,30 @@ const App: React.FC = () => {
         )}
 
         <main className="flex-1 min-h-0 relative">
+            {buildingData && Object.keys(buildingData.floors).length > 1 && (
+                <div className="absolute top-4 left-4 z-10 flex flex-wrap gap-2 bg-slate-900/80 p-2 rounded-lg border border-slate-700 backdrop-blur max-w-[80%]">
+                    <span className="text-slate-400 text-xs flex items-center mr-2">楼层:</span>
+                    {Object.keys(buildingData.floors).map(floorId => {
+                        const floorName = floorId.replace('floor_', '') + 'F';
+                        return (
+                            <button
+                                key={floorId}
+                                onClick={() => {
+                                    setActiveFloor(floorId);
+                                    setLayout(buildingData.floors[floorId]);
+                                }}
+                                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                                    activeFloorId === floorId 
+                                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' 
+                                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700'
+                                }`}
+                            >
+                                {floorName}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
             {layout ? <MapRenderer ref={mapRef} /> : (
                 <div className="w-full h-full flex flex-col items-center justify-center border border-slate-800 rounded-lg bg-slate-900/50 gap-4">
                     <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center">

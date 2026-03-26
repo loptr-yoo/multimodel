@@ -224,10 +224,31 @@ export const FloorPlanScene: SceneDefinition = {
   ]
 };
 
+export const BuildingScene: SceneDefinition = {
+  id: 'building',
+  name: 'Building',
+  description: 'Generate a multi-story building (B1 parking + upper floor plans).',
+  promptConfig: {
+    roleDefinition: 'Building Orchestrator',
+    geometricRules: `Use floor-specific rules based on per-floor scene.`,
+    requiredElements: [],
+    exampleJSON: `{"floors":[{"id":"B1","sceneId":"parking_underground"},{"id":"1F","sceneId":"building_floor_plan"}]}`
+  },
+  styles: {},
+  zOrder: []
+};
+
 export const DEFAULT_SCENE_ID = ParkingScene.id;
 
 export const SCENE_REGISTRY: Record<string, SceneDefinition> = {
   [ParkingScene.id]: ParkingScene,
   [GenericScene.id]: GenericScene,
-  [FloorPlanScene.id]: FloorPlanScene
+  [FloorPlanScene.id]: FloorPlanScene,
+  [BuildingScene.id]: BuildingScene
+};
+
+export const SCENE_SELECTION_REGISTRY: Record<string, SceneDefinition> = {
+  [ParkingScene.id]: ParkingScene,
+  [FloorPlanScene.id]: FloorPlanScene,
+  [BuildingScene.id]: BuildingScene
 };

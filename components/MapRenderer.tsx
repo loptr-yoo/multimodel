@@ -103,7 +103,8 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
     
     const mainGroup = svg.append("g").attr("class", "main-group");
 
-    const activeScene = SCENE_REGISTRY[activeSceneId] || SCENE_REGISTRY[DEFAULT_SCENE_ID];
+    const sceneKey = layout.sceneId || activeSceneId;
+    const activeScene = SCENE_REGISTRY[sceneKey] || SCENE_REGISTRY[DEFAULT_SCENE_ID];
     const sceneStyles = activeScene?.styles || ELEMENT_STYLES;
     
     const defaultZOrder = [

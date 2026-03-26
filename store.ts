@@ -1,10 +1,12 @@
 import { create } from 'zustand';
-import { ParkingLayout, ConstraintViolation } from './types';
+import { ParkingLayout, ConstraintViolation, BuildingData } from './types';
 import { AIProvider } from './utils/aiConfig';
 import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from './utils/sceneRegistry';
 
 interface AppState {
   layout: ParkingLayout | null;
+  buildingData: BuildingData | null;
+  activeFloorId: string;
   violations: ConstraintViolation[];
   isGenerating: boolean;
   error: string | null;
@@ -20,6 +22,9 @@ interface AppState {
 
   // Actions
   setLayout: (layout: ParkingLayout | null) => void;
+  setBuildingData: (data: BuildingData | null) => void;
+  setActiveFloor: (floorId: string) => void;
+  updateFloorLayout: (floorId: string, layout: ParkingLayout) => void;
   setViolations: (violations: ConstraintViolation[]) => void;
   setIsGenerating: (isGenerating: boolean) => void;
   setError: (error: string | null) => void;
@@ -33,6 +38,8 @@ interface AppState {
 
 export const useStore = create<AppState>((set) => ({
   layout: null,
+  buildingData: null,
+  activeFloorId: '',
   violations: [],
   isGenerating: false,
   error: null,
@@ -44,6 +51,20 @@ export const useStore = create<AppState>((set) => ({
   availableModels: [],
 
   setLayout: (layout) => set({ layout }),
+  setBuildingData: (data) => set({ buildingData: data }),
+  setActiveFloor: (floorId) => set({ activeFloorId: floorId }),
+  updateFloorLayout: (floorId, layout) => set((state) => {
+    if (!state.buildingData) return state;
+    return {
+      buildingData: {
+        ...state.buildingData,
+        floors: {
+          ...state.buildingData.floors,
+          [floorId]: layout
+        }
+      }
+    };
+  }),
   setViolations: (violations) => set({ violations }),
   setIsGenerating: (isGenerating) => set({ isGenerating }),
   setError: (error) => set({ error }),

@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Layers, Map as MapIcon, Sparkles, Download, Key, Grid } from 'lucide-react';
+import { Layers, Map as MapIcon, Sparkles, Download, Key } from 'lucide-react';
 import { useStore } from '../store';
 import { ModelSelector } from './ModelSelector';
-import { SCENE_REGISTRY } from '../utils/sceneRegistry';
+import { SceneSelector } from './SceneSelector';
+import { SCENE_SELECTION_REGISTRY } from '../utils/sceneRegistry';
 
 interface Props {
   onGenerate: (p: string, sceneId: string) => void;
@@ -50,25 +51,11 @@ const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDo
       )}
 
       <div className="space-y-3">
-        <div className="space-y-2">
-          <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-            <Grid size={12} /> Scene
-          </label>
-          <select
-            value={activeSceneId}
-            onChange={(e) => switchScene(e.target.value)}
-            className="w-full bg-slate-800 border border-slate-700 rounded text-xs text-white p-2 focus:ring-1 focus:ring-blue-500 outline-none"
-          >
-            {Object.values(SCENE_REGISTRY).map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-          {SCENE_REGISTRY[activeSceneId]?.description && (
-            <p className="text-[10px] text-slate-500 leading-tight">
-              {SCENE_REGISTRY[activeSceneId].description}
-            </p>
-          )}
-        </div>
+        <SceneSelector 
+           scenes={SCENE_SELECTION_REGISTRY} 
+          activeSceneId={activeSceneId} 
+          onSceneChange={switchScene} 
+        />
         <label className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Design Prompt</label>
         <textarea 
           className="w-full bg-slate-800 border border-slate-700 rounded p-3 text-sm text-slate-200 h-24 resize-none focus:outline-none focus:border-blue-500 transition-colors"

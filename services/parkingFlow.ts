@@ -4,8 +4,9 @@
  * 适用于所有 LLM Provider
  */
 
-import { ParkingLayout, ConstraintViolation, ElementType, SceneDefinition } from '../types';
+import { ParkingLayout, ConstraintViolation, ElementType, LayoutElement, SceneDefinition } from '../types';
 import { PROMPTS } from '../utils/prompts';
+import { FLOOR_DRAFTSMAN_PROMPT } from '../utils/buildingPrompts';
 import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 import { safeParseResponse, normalizeLayoutElementTypes } from './responseParser';
 import { validateLayout, calculateVoidRatio } from '../utils/geometry';
@@ -23,7 +24,8 @@ import {
   fillVoidsWithGround,
   calculateScore,
   sleep,
-  normalizeType
+  normalizeType,
+  compressPrompt
 } from './aiCommonUtils';
 
 // --- 配置常量 ---
@@ -60,20 +62,25 @@ const applySceneTypeNormalization = (raw: any, sceneId?: string): any => {
 /**
  * 带有重试机制的 LLM 调用
  */
-const callLLMWithRetry = async (
+export const callLLMWithRetry = async (
   client: LLMClient, 
   messages: any[], 
   config: LLMConfig, 
   onLog?: (msg: string) => void
 ): Promise<string> => {
   let lastError: Error | null = null;
+  const compressedMessages = messages.map(m => ({
+    ...m,
+    content: compressPrompt(m.content)
+  }));
+
   for (let i = 0; i < MAX_RETRIES; i++) {
     try {
       if (i > 0) {
         onLog?.(`⏳ [${client.providerName}] 请求重试 ${i}/${MAX_RETRIES}...`);
         await sleep(1000 * i); // 指数退避
       }
-      return await client.chat(messages, config);
+      return await client.chat(compressedMessages, config);
     } catch (e: any) {
       lastError = e;
       onLog?.(`⚠️ [${client.providerName}] 调用失败: ${e.message}`);
@@ -101,7 +108,12 @@ const runIterativeFix = async (
     ElementType.GROUND,
     ElementType.RAMP,
     ElementType.ENTRANCE,
-    ElementType.EXIT
+    ElementType.EXIT,
+    ElementType.WALL_EXTERNAL,
+    ElementType.SHEAR_WALL,
+    ElementType.ELEVATOR_SHAFT,
+    ElementType.ELEVATOR,
+    ElementType.STAIRCASE
   ]);
 
   for (let pass = 1; pass <= MAX_FIX_PASSES; pass++) {
@@ -221,6 +233,46 @@ const runIterativeFix = async (
   }
 
   return currentLayout;
+};
+
+export const executeFloorGenerationWithCore = async (
+  prompt: string,
+  coreBlueprint: LayoutElement[],
+  client: LLMClient,
+  apiKey: string,
+  model: string,
+  onLog?: (msg: string) => void,
+  sceneId?: string
+): Promise<ParkingLayout> => {
+  const scene = getActiveScene(sceneId);
+  const config: LLMConfig = {
+    apiKey,
+    model,
+    temperature: 0.9,
+    maxTokens: 8192
+  };
+
+  onLog?.(` [${client.providerName}] 开始生成楼层...`);
+
+  const responseText = await callLLMWithRetry(client, [
+    { role: 'user', content: FLOOR_DRAFTSMAN_PROMPT(prompt, coreBlueprint, scene) }
+  ], config, onLog);
+
+  const rawParsed = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
+  const rawData = applySceneTypeNormalization(rawParsed, sceneId);
+  const layout = mapToInternalLayout(rawData);
+
+  const coreIds = new Set(coreBlueprint.map(e => e.id));
+  const merged: ParkingLayout = {
+    ...layout,
+    elements: [
+      ...layout.elements.filter(e => !coreIds.has(e.id)),
+      ...coreBlueprint
+    ]
+  };
+
+  const fixed = await runIterativeFix(merged, client, { ...config, temperature: 0.1 }, scene, onLog, { freezeStructural: true });
+  return postProcessLayout(fixed);
 };
 const validateGeneratedContent = (layout: ParkingLayout): void =>
  {
@@ -372,7 +424,12 @@ export const executeRefinement = async (
         ElementType.GROUND,
         ElementType.RAMP,
         ElementType.ENTRANCE,
-        ElementType.EXIT
+        ElementType.EXIT,
+        ElementType.WALL_EXTERNAL,
+        ElementType.SHEAR_WALL,
+        ElementType.ELEVATOR_SHAFT,
+        ElementType.ELEVATOR,
+        ElementType.STAIRCASE
       ]);
       updates = updates.filter(p => {
         const pid = String(p.id ?? p.element_id ?? '');

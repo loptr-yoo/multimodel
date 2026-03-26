@@ -81,6 +81,7 @@ export interface ParkingLayout {
   width: number;
   height: number;
   elements: LayoutElement[];
+  sceneId?: string;
 }
 
 export interface ConstraintViolation {
@@ -127,4 +128,19 @@ export interface SceneDefinition {
   zOrder?: string[];
   elementNormalization?: Record<string, string>;
   postProcessAlgorithms?: LayoutAlgorithm[];
+}
+
+export interface BuildingBlueprint {
+  coreElements: LayoutElement[];
+}
+
+export interface BuildingFloor {
+  id: string;
+  name: string;
+  layout: ParkingLayout;
+}
+
+export interface BuildingData {
+  blueprint: LayoutElement[];
+  floors: Record<string, ParkingLayout>;
 }
