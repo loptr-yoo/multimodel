@@ -196,8 +196,16 @@ Design principles:
     `;
   },
 
-  fix: (layout: ParkingLayout, violations: ConstraintViolation[], scene: SceneDefinition) => {
+  fix: (layout: ParkingLayout, violations: ConstraintViolation[], scene: SceneDefinition, options?: { frozenIds?: string[] }) => {
     const isParking = scene.promptConfig.requiredElements.includes('driving_lane') || scene.promptConfig.requiredElements.includes('slope');
+    const lockWarning = options?.frozenIds && options.frozenIds.length > 0
+      ? `
+    WARNING:
+    - Pre-placed core elements (especially any element whose ID contains 'core_') are PHYSICALLY LOCKED.
+    - You CANNOT change their x/y/w/h. Any attempted modifications to them will be rejected.
+    - Resolve overlaps by moving/resizing OTHER elements instead.
+      `
+      : '';
     if (!isParking) {
       return `
     ${ROLES.FIXER}
@@ -205,6 +213,7 @@ Design principles:
     You are a **Scene Constraint Fixer**.
     INPUT: ${layout.width}x${layout.height} Canvas.
     VIOLATIONS: ${JSON.stringify(violations)}
+    ${lockWarning}
 
     Rules:
     - Only fix elements referenced by violations.
@@ -221,6 +230,7 @@ Design principles:
     
     **INPUT**: ${layout.width}x${layout.height} Canvas.
     **VIOLATIONS**: ${JSON.stringify(violations)}
+    ${lockWarning}
 
     **CRITICAL RULES**:
     ${scene.promptConfig.geometricRules}

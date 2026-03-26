@@ -4,7 +4,7 @@
  * 核心修复：找回了丢失的 fillParkingAutomatically 等关键算法
  */
 
-import { ParkingLayout, ElementType, LayoutElement, ConstraintViolation } from '../types';
+import { ParkingLayout, ElementType, LayoutElement, ConstraintViolation, SceneDefinition } from '../types';
 import { validateLayout, getIntersectionBox } from '../utils/geometry';
 
 // =============== 几何计算工具 ===============
@@ -401,6 +401,23 @@ export const postProcessLayout = (layout: ParkingLayout): ParkingLayout => {
   // 【新增】：调用微缝吸附算法
   processed = snapGroundToBoundaries(processed);
 
+  return processed;
+};
+
+export const applyScenePostProcess = (
+  layout: ParkingLayout,
+  scene: SceneDefinition,
+  onLog?: (msg: string) => void
+): ParkingLayout => {
+  let processed = postProcessLayout(layout);
+  const algos = Array.isArray(scene.postProcessAlgorithms) ? scene.postProcessAlgorithms : [];
+  for (const algo of algos) {
+    try {
+      processed = algo(processed);
+    } catch (e: any) {
+      onLog?.(`⚠️ 后处理算法失败: ${e?.message || String(e)}`);
+    }
+  }
   return processed;
 };
 
@@ -967,10 +984,14 @@ export const fixSmallGeometry = (layout: ParkingLayout): ParkingLayout => {
 // services/aiCommonUtils.ts
 
 export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
-  // 1. 过滤掉之前自动生成的GROUND（如果有），避免重复填充
   const cleanElements = layout.elements.filter(el => !el.id.startsWith('auto_ground_void_'));
-  let voids = [{ x: 0, y: 0, width: layout.width, height: layout.height }];
-  // 2. 定义哪些类型是实心的，会遮挡GROUND
+  const step = 10;
+  const width = Math.max(1, Math.round(layout.width));
+  const height = Math.max(1, Math.round(layout.height));
+  const cols = Math.max(1, Math.ceil(width / step));
+  const rows = Math.max(1, Math.ceil(height / step));
+  const occupied = new Array<boolean>(rows * cols).fill(false);
+
   const solidTypes = new Set<string>([
     ElementType.WALL,
     ElementType.ROAD,
@@ -982,38 +1003,79 @@ export const fillVoidsWithGround = (layout: ParkingLayout): ParkingLayout => {
     ElementType.ELEVATOR,
     ElementType.PILLAR
   ]);
-  // 3. 遍历元素，逐步从voids中减去实心元素占据的区域
-  for (const el of cleanElements) {
-    const type = normalizeType(el.type as any);
-    if (!solidTypes.has(type)) continue;
 
-    const nextVoids = [];
-    for (const v of voids) {
-      nextVoids.push(...subtractRectangle(v, el));
+  const markOccupied = (el: LayoutElement) => {
+    const x1 = Math.max(0, Math.floor(el.x / step));
+    const y1 = Math.max(0, Math.floor(el.y / step));
+    const x2 = Math.min(cols - 1, Math.floor((el.x + el.width - 1) / step));
+    const y2 = Math.min(rows - 1, Math.floor((el.y + el.height - 1) / step));
+    for (let y = y1; y <= y2; y++) {
+      for (let x = x1; x <= x2; x++) {
+        occupied[y * cols + x] = true;
+      }
     }
-    voids = nextVoids;
-  }
-  // 4. 将剩余的voids转换为GROUND元素，过滤掉过小的区域
-  const newGrounds = voids
-    .filter(v => v.width >= 5 && v.height >= 5)
-    .map((v, i) => ({
-      id: `auto_ground_void_${Date.now()}_${i}`,
-      type: ElementType.GROUND,
-      x: Math.round(v.x),
-      y: Math.round(v.y),
-      width: Math.round(v.width),
-      height: Math.round(v.height),
-      rotation: 0
-    }));
-  
-  if (newGrounds.length === 0) {
-    return { ...layout, elements: cleanElements };
-  }
-  // 5. 返回新的布局，GROUND元素放在最后以保证被其他元素覆盖
-  return {
-    ...layout,
-    elements: [...newGrounds, ...cleanElements]
   };
+
+  for (const el of cleanElements) {
+    const t = normalizeType(el.type as any);
+    if (!solidTypes.has(t)) continue;
+    markOccupied(el);
+  }
+
+  const segmentsByRow: Array<Array<{ x1: number; x2: number }>> = new Array(rows);
+  for (let y = 0; y < rows; y++) {
+    const segs: Array<{ x1: number; x2: number }> = [];
+    let start = -1;
+    for (let x = 0; x < cols; x++) {
+      const isEmpty = !occupied[y * cols + x];
+      if (isEmpty && start === -1) start = x;
+      if (!isEmpty && start !== -1) {
+        segs.push({ x1: start, x2: x - 1 });
+        start = -1;
+      }
+    }
+    if (start !== -1) segs.push({ x1: start, x2: cols - 1 });
+    segmentsByRow[y] = segs;
+  }
+
+  type OpenRect = { x1: number; x2: number; y1: number; y2: number };
+  const rects: OpenRect[] = [];
+  let prev = new Map<string, OpenRect>();
+  for (let y = 0; y < rows; y++) {
+    const next = new Map<string, OpenRect>();
+    for (const seg of segmentsByRow[y]) {
+      const key = `${seg.x1}-${seg.x2}`;
+      const existing = prev.get(key);
+      if (existing) {
+        existing.y2 = y;
+        next.set(key, existing);
+      } else {
+        const r: OpenRect = { x1: seg.x1, x2: seg.x2, y1: y, y2: y };
+        next.set(key, r);
+      }
+    }
+    for (const [key, r] of prev.entries()) {
+      if (!next.has(key)) rects.push(r);
+    }
+    prev = next;
+  }
+  for (const r of prev.values()) rects.push(r);
+
+  const ts = Date.now();
+  const newGrounds: LayoutElement[] = rects
+    .map((r, i) => ({
+      id: `auto_ground_void_${ts}_${i}`,
+      type: ElementType.GROUND,
+      x: r.x1 * step,
+      y: r.y1 * step,
+      width: Math.min(width - r.x1 * step, (r.x2 - r.x1 + 1) * step),
+      height: Math.min(height - r.y1 * step, (r.y2 - r.y1 + 1) * step),
+      rotation: 0
+    }))
+    .filter(g => g.width >= 5 && g.height >= 5);
+
+  if (newGrounds.length === 0) return { ...layout, elements: cleanElements };
+  return { ...layout, elements: [...newGrounds, ...cleanElements] };
 };
 
 /**

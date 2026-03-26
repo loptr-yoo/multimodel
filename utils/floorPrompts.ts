@@ -1,6 +1,9 @@
 export const floorPlanSystemPrompt = {
   rules: `
   **PHASE 1 - CORE STRUCTURE RULES**:
+  0. **STEP 1 (CRITICAL)**:
+     - You MUST first generate a background element of type 'floor_slab' starting at x:0, y:0 with width:800, height:600.
+     - ALL other rooms, walls, and corridors must be placed ON TOP of this slab.
   1. **DO NOT GENERATE FURNITURE**: No beds, sofas, or tables yet.
   2. **ENVELOPE**:
      - 'exterior_wall' (thickness 15): Must form a continuous, closed boundary around the entire plan.

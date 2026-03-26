@@ -9,11 +9,12 @@ import { PROMPTS } from '../utils/prompts';
 import { FLOOR_DRAFTSMAN_PROMPT } from '../utils/buildingPrompts';
 import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 import { safeParseResponse, normalizeLayoutElementTypes } from './responseParser';
-import { validateLayout, calculateVoidRatio } from '../utils/geometry';
+import { getIntersectionBox, validateLayout, calculateVoidRatio } from '../utils/geometry';
 import { LLMClient, LLMConfig } from './llmProvider';
 import {
   mapToInternalLayout,
   postProcessLayout,
+  applyScenePostProcess,
   mergeLayoutElements,
   mergePatchesToLayout,
   normalizePartialPatches,
@@ -98,12 +99,11 @@ const runIterativeFix = async (
   config: LLMConfig,
   scene: SceneDefinition,
   onLog?: (msg: string) => void,
-  options: { freezeStructural?: boolean } = {}
+  options: { freezeStructural?: boolean; frozenIds?: string[] } = {}
 ): Promise<ParkingLayout> => {
   let currentLayout = layout;
   let lastScore = Infinity;
   const structuralTypes = new Set<string>([
-    ElementType.WALL,
     ElementType.ROAD,
     ElementType.GROUND,
     ElementType.RAMP,
@@ -117,7 +117,26 @@ const runIterativeFix = async (
   ]);
 
   for (let pass = 1; pass <= MAX_FIX_PASSES; pass++) {
-    const violations = validateLayout(currentLayout);
+    let violations = validateLayout(currentLayout);
+    if (scene.id === DEFAULT_SCENE_ID) {
+      violations = violations.filter(v => v.elementId !== 'global_ground_check');
+      violations = violations.filter(v =>
+        !String(v.elementId || '').includes('auto_ground_void_') &&
+        !String(v.targetId || '').includes('auto_ground_void_')
+      );
+    }
+    if (scene.id !== DEFAULT_SCENE_ID) {
+      violations = violations.filter(v => {
+        if (v.type !== 'overlap') return true;
+        if (!v.targetId) return true;
+        const a = currentLayout.elements.find(e => e.id === v.elementId);
+        const b = currentLayout.elements.find(e => e.id === v.targetId);
+        if (!a || !b) return true;
+        const box = getIntersectionBox(a, b);
+        if (!box) return true;
+        return Math.min(box.width, box.height) > 9;
+      });
+    }
     const score = calculateScore(violations);
     if (violations.length > 0) {
       const counts = violations.reduce((acc: Record<string, number>, v) => {
@@ -159,11 +178,12 @@ const runIterativeFix = async (
     const simplifiedInput = currentLayout.elements.map(e => ({
       id: e.id, t: e.type, x: Math.round(e.x), y: Math.round(e.y), w: Math.round(e.width), h: Math.round(e.height), r: e.rotation
     }));
+    const compactLayout: any = { width: currentLayout.width, height: currentLayout.height, elements: simplifiedInput };
 
     try {
       // 发送请求
       const fixResponse = await callLLMWithRetry(client, [
-        { role: 'user', content: PROMPTS.fix(simplifiedInput as any, violations, scene) }
+        { role: 'user', content: PROMPTS.fix(compactLayout, violations, scene, { frozenIds: options.frozenIds }) }
       ], { ...config, temperature: 0.1 }, onLog);
 
       const parsed = await safeParseResponse(fixResponse, { provider: client.providerName as any, model: config.model }, onLog);
@@ -172,11 +192,13 @@ const runIterativeFix = async (
       // 优先查找 modified_elements，如果 AI 还是习惯性返回了 elements，也能兼容
       let patches: any[] = [];
       let deletedIds = [];
+      let newPatches: any[] = [];
       
       if (parsed.modified_elements && Array.isArray(parsed.modified_elements)) {
         // 增量模式
         patches = parsed.modified_elements;
         deletedIds = parsed.deleted_ids || [];
+        newPatches = Array.isArray(parsed.new_elements) ? parsed.new_elements : [];
         onLog?.(`🔧 应用 ${patches.length} 个修复补丁，删除 ${deletedIds.length} 个元素...`);
       } else if (parsed.elements && Array.isArray(parsed.elements)) {
         // 全量模式
@@ -191,7 +213,11 @@ const runIterativeFix = async (
         if (parsed.modified_elements && !parsed.elements) {
           let cleaned = normalizePartialPatches(patches);
           let filteredDeletes = deletedIds;
-          if (options.freezeStructural) {
+          if (options.frozenIds && options.frozenIds.length > 0) {
+            const frozenSet = new Set(options.frozenIds);
+            cleaned = cleaned.filter(p => !frozenSet.has(String(p.id ?? p.element_id)));
+            filteredDeletes = deletedIds.filter(id => !frozenSet.has(id));
+          } else if (options.freezeStructural) {
             cleaned = cleaned.filter(p => {
               const pid = String(p.id ?? p.element_id ?? '');
               const existing = currentLayout.elements.find(el => el.id === pid);
@@ -205,6 +231,18 @@ const runIterativeFix = async (
             });
           }
           currentLayout = mergePatchesToLayout(currentLayout, cleaned, filteredDeletes, { mode: 'strict' });
+          if (newPatches.length > 0) {
+            let adds = mapToInternalLayout({ width: currentLayout.width, height: currentLayout.height, elements: newPatches }).elements;
+            if (options.frozenIds && options.frozenIds.length > 0) {
+              const frozenSet = new Set(options.frozenIds);
+              adds = adds.filter(p => !frozenSet.has(String(p.id)));
+            } else if (options.freezeStructural) {
+              adds = adds.filter(p => !structuralTypes.has(normalizeType(p.type as any)));
+            }
+            if (adds.length > 0) {
+              currentLayout = mergePatchesToLayout(currentLayout, adds, [], { mode: 'allowCreate' });
+            }
+          }
         } else {
           if (options.freezeStructural) {
             onLog?.(`⚠️ [Fix Loop] 忽略全量修复以保护骨架`);
@@ -245,6 +283,7 @@ export const executeFloorGenerationWithCore = async (
   sceneId?: string
 ): Promise<ParkingLayout> => {
   const scene = getActiveScene(sceneId);
+  const isParkingScene = scene.id === DEFAULT_SCENE_ID;
   const config: LLMConfig = {
     apiKey,
     model,
@@ -254,25 +293,95 @@ export const executeFloorGenerationWithCore = async (
 
   onLog?.(` [${client.providerName}] 开始生成楼层...`);
 
-  const responseText = await callLLMWithRetry(client, [
-    { role: 'user', content: FLOOR_DRAFTSMAN_PROMPT(prompt, coreBlueprint, scene) }
-  ], config, onLog);
+  let floorLayout: ParkingLayout | null = null;
+  let lastError: Error | null = null;
+  const MAX_GEN_RETRIES = 3;
 
-  const rawParsed = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
-  const rawData = applySceneTypeNormalization(rawParsed, sceneId);
-  const layout = mapToInternalLayout(rawData);
+  for (let attempt = 1; attempt <= MAX_GEN_RETRIES; attempt++) {
+    try {
+      if (attempt > 1) {
+        onLog?.(`🔄 生成重试 ${attempt}/${MAX_GEN_RETRIES}: 上次结果不完整...`);
+        await sleep(1000);
+      }
 
-  const coreIds = new Set(coreBlueprint.map(e => e.id));
-  const merged: ParkingLayout = {
-    ...layout,
-    elements: [
-      ...layout.elements.filter(e => !coreIds.has(e.id)),
-      ...coreBlueprint
-    ]
-  };
+      const responseText = await callLLMWithRetry(client, [
+        { role: 'user', content: FLOOR_DRAFTSMAN_PROMPT(prompt, coreBlueprint, scene) }
+      ], config, onLog);
 
-  const fixed = await runIterativeFix(merged, client, { ...config, temperature: 0.1 }, scene, onLog, { freezeStructural: true });
-  return postProcessLayout(fixed);
+      const rawParsed = await safeParseResponse(responseText, { provider: client.providerName as any, model }, onLog);
+      const rawData = applySceneTypeNormalization(rawParsed, sceneId);
+      if (rawData.reasoning_plan && onLog) onLog(`🧠 Plan: ${rawData.reasoning_plan}`);
+
+      const deltaElements = Array.isArray(rawData?.new_elements)
+        ? rawData.new_elements
+        : Array.isArray(rawData?.elements)
+          ? rawData.elements
+          : [];
+
+      const deltaLayout = mapToInternalLayout({
+        width: rawData?.width || 800,
+        height: rawData?.height || 600,
+        elements: deltaElements
+      });
+
+      const coreIds = coreBlueprint.map(e => e.id);
+      const coreIdSet = new Set(coreIds);
+      const seen = new Set<string>();
+      const newElements = deltaLayout.elements.filter(e => {
+        if (!e?.id) return false;
+        if (coreIdSet.has(e.id)) return false;
+        if (seen.has(e.id)) return false;
+        seen.add(e.id);
+        return true;
+      });
+
+      const merged: ParkingLayout = {
+        ...deltaLayout,
+        elements: [...newElements, ...coreBlueprint]
+      };
+
+      if (isParkingScene) validateGeneratedContent(merged);
+      else validateFloorPlanDelta(newElements, deltaLayout);
+      floorLayout = merged;
+
+      onLog?.(`✅ 初步生成成功: 包含 ${newElements.length} 个新增元素`);
+      break;
+    } catch (e: any) {
+      lastError = e;
+      onLog?.(`⚠️ 生成质量校验失败: ${e.message}`);
+      if (attempt === MAX_GEN_RETRIES) {
+        throw new Error(`生成失败，模型连续 ${MAX_GEN_RETRIES} 次输出不完整: ${e.message}`);
+      }
+    }
+  }
+
+  if (!floorLayout) throw lastError || new Error("Unknown floor generation error");
+  const frozenIds = coreBlueprint.map(e => e.id);
+
+  if (!isParkingScene) {
+    const hasSlab = floorLayout.elements.some(e => e.type === ElementType.SLAB);
+    const withSlab = hasSlab
+      ? floorLayout
+      : {
+          ...floorLayout,
+          elements: [
+            { id: 'floor_slab', type: ElementType.SLAB, x: 0, y: 0, width: 800, height: 600 },
+            ...floorLayout.elements
+          ]
+        };
+    return applyScenePostProcess(withSlab, scene, onLog);
+  }
+
+  let fixedLayout = await runIterativeFix(
+    floorLayout,
+    client,
+    { ...config, temperature: 0.1 },
+    scene,
+    onLog,
+    { freezeStructural: true, frozenIds }
+  );
+  fixedLayout = fillVoidsWithGround(fixedLayout);
+  return applyScenePostProcess(fixedLayout, scene, onLog);
 };
 const validateGeneratedContent = (layout: ParkingLayout): void =>
  {
@@ -290,6 +399,23 @@ const validateGeneratedContent = (layout: ParkingLayout): void =>
  (!hasRoad) {
     throw new Error("Incomplete generation: No roads detected. AI failed to generate layout interior."
 );
+  }
+};
+
+const validateFloorPlanDelta = (newElements: LayoutElement[], deltaLayout: ParkingLayout): void => {
+  if (newElements.length < 15) {
+    throw new Error(`Incomplete floor plan: Only ${newElements.length} new elements found. AI stopped early.`);
+  }
+  const hasWalls = deltaLayout.elements.some(e => {
+    const t = normalizeType(e.type as any);
+    return t === ElementType.WALL_EXTERNAL || t === ElementType.WALL_INTERNAL || t === ElementType.WALL;
+  });
+  if (!hasWalls) {
+    throw new Error('Incomplete floor plan: No walls detected.');
+  }
+  const hasDoor = deltaLayout.elements.some(e => normalizeType(e.type as any) === ElementType.DOOR);
+  if (!hasDoor) {
+    throw new Error('Incomplete floor plan: No doors detected.');
   }
 };
 /**
@@ -358,11 +484,11 @@ export const executeGeneration = async (
 
   if (!layout) throw lastError || new Error("Unknown generation error");
 
-  if (!isParkingScene) return postProcessLayout(layout);
+  if (!isParkingScene) return applyScenePostProcess(layout, scene, onLog);
 
   layout = await runIterativeFix(layout, client, config, scene, onLog);
   layout = fillVoidsWithGround(layout);
-  layout = postProcessLayout(layout);
+  layout = applyScenePostProcess(layout, scene, onLog);
   const voidRatio = calculateVoidRatio(layout);
   if (voidRatio > 0.005) {
     const msg = `Void ratio too high before refinement: ${(voidRatio * 100).toFixed(3)}%`;

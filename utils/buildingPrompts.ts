@@ -56,7 +56,16 @@ export const FLOOR_DRAFTSMAN_PROMPT = (
   coreBlueprint: LayoutElement[],
   scene: SceneDefinition
 ) => {
-  const coreElementsStr = JSON.stringify(coreBlueprint);
+  const coreElementsStr = JSON.stringify(
+    coreBlueprint.map(e => ({
+      id: e.id,
+      type: e.type,
+      x: e.x,
+      y: e.y,
+      width: e.width,
+      height: e.height
+    }))
+  );
   
   return `
 You are the **Floor Draftsman**. Your task is to design the internal layout for a specific floor.
@@ -64,29 +73,41 @@ You are the **Floor Draftsman**. Your task is to design the internal layout for 
 FLOOR GOAL: "${floorPrompt}"
 SCENE RULES: ${scene.promptConfig.geometricRules}
 
-[CRITICAL CONSTRAINT: PRE-PLACED CORE ELEMENTS]
-The following elements are ALREADY PLACED and are IMMUTABLE. 
-You MUST include them in your output exactly as they are (same ID, type, position, and dimensions).
-You must build the rest of the floor layout (rooms, walls, corridors) AROUND these elements.
+!!! CRITICAL CONSTRAINT (THE CORE TUBE) !!!
+The following structural elements (Elevators, Stairs, Shear Walls) are ALREADY PLACED on the canvas.
+Build all your internal rooms, corridors, or parking spaces AROUND these elements. Do NOT overlap them.
 
-CORE ELEMENTS:
+[PRE-PLACED CORE ELEMENTS]:
 ${coreElementsStr}
 
+!!! OUTPUT INSTRUCTIONS (CRITICAL) !!!
+1. DO NOT include the pre-placed core elements in your JSON output. They are already in memory.
+2. You MUST ONLY output the NEW elements you are designing for this floor.
+3. If the scene is 'parking_underground':
+   - You MUST generate continuous perimeter 'wall' elements to form a closed 800x600 boundary.
+   - You MUST generate the road skeleton ONLY (driving_lane) and walls (and ramps/entrance/exit if needed).
+   - DO NOT output any 'parking_space'. Parking spaces will be computed and generated automatically along your roads.
+   - DO NOT output any 'ground' element. Background fill will be handled by an algorithm.
+   - DO NOT attempt to fill empty spaces with multiple small 'ground' elements.
+4. If the scene is NOT 'parking_underground' (floor plan):
+   - You MUST output ONE 'floor_slab' at x:0, y:0, w:800, h:600 in new_elements.
+   - You MUST explicitly draw ALL 'exterior_wall', 'partition_wall', 'door', and functional zones (lobby/toilets/office/etc).
+   - DO NOT STOP after generating the slab. Output at least 15-30 elements in new_elements to form a COMPLETE architectural layout.
+   - JSON STRUCTURE: new_elements MUST be a flat array. Do NOT nest elements inside floor_slab.
+
+STRICT RULES:
+1. Respond with RAW JSON only. No markdown, no explanation.
+2. Return only NEW elements as "new_elements" (array). Do NOT output "elements".
+3. Every element must include: id, t, x, y, w, h.
+
 OUTPUT FORMAT:
-Return a COMPLETE JSON layout including the core elements and your new elements.
 {
   "width": 800,
   "height": 600,
   "reasoning_plan": "...",
-  "elements": [
-    ... (include ALL core elements here) ...,
-    { "id": "room_1", "t": "bedroom", "x": ..., "y": ..., "w": ..., "h": ... }
+  "new_elements": [
+    { "id": "el_1", "t": "corridor", "x": 0, "y": 0, "w": 10, "h": 10 }
   ]
 }
-
-STRICT RULES:
-1. DO NOT modify, move, or delete the CORE ELEMENTS.
-2. All rooms must connect to the circulation system that leads to the core elements.
-3. Respond with RAW JSON only.
 `;
 };
